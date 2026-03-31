@@ -1,0 +1,71 @@
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kinopio-hub"
+version = "0.1.0"
+description = "High-performance communication middleware for scoped NATS messaging."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "GPL-3.0-or-later"
+authors = [
+  { name = "skyboooox" },
+]
+keywords = ["messaging", "nats", "pubsub", "request-reply", "scope"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Libraries",
+  "Topic :: System :: Networking",
+]
+dependencies = [
+  "aiohttp>=3.10",
+  "nats-py>=2.14.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy>=1.18.0",
+  "pytest>=8.3.0",
+  "pytest-asyncio>=1.2.0",
+  "ruff>=0.13.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/skyboooox/KinopioHub"
+Documentation = "https://github.com/skyboooox/KinopioHub"
+Repository = "https://github.com/skyboooox/KinopioHub"
+Issues = "https://github.com/skyboooox/KinopioHub/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kinopio_hub"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests", "examples"]
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "W"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["src", "tests"]
+check_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_return_any = true
+ignore_missing_imports = true
