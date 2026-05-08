@@ -14,11 +14,14 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import Any
-from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from nats import errors as nats_errors
 
-from kinopio_hub import ConnectionState, KinopioHub, SubscriptionHandle
+from kinopio_hub import KinopioHub, Variable
+from kinopio_hub._hub import SubscriptionHandle
+
+pytestmark = pytest.mark.integration
 
 
 @pytest.mark.asyncio
@@ -26,7 +29,6 @@ async def test_callback_exception_is_caught_and_logged(nats_server: Any, caplog:
     """Test that exceptions in user callbacks don't propagate to NATS message loop."""
     async with KinopioHub(servers=[nats_server.tcp_url], debug=True) as hub_publisher:
         received = []
-        event = asyncio.Event()
 
         async with KinopioHub(servers=[nats_server.tcp_url], debug=True) as hub_subscriber:
             def bad_callback(data: Any, _: Any) -> None:
@@ -135,9 +137,8 @@ async def test_connection_lock_prevents_race_condition(nats_server: Any) -> None
 
         # Create multiple concurrent publish requests
         variables = [hub.test.var1, hub.test.var2, hub.test.var3, hub.test.var4]
-        total_messages = 100
 
-        async def publish_many(variable: KinopioHub) -> None:
+        async def publish_many(variable: Variable) -> None:
             for i in range(25):
                 await variable.publish({"value": i})
 
@@ -188,6 +189,22 @@ async def test_unsubscribe_logs_exception_on_failure(nats_server: Any, caplog: A
 
         # Verify subscription was removed
         assert not handle.active
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_ignores_connection_closed_error(caplog: Any) -> None:
+    class ClosedSubscription:
+        async def unsubscribe(self) -> None:
+            raise nats_errors.ConnectionClosedError
+
+    handle = SubscriptionHandle(subject="test.closed")
+    handle.bind(ClosedSubscription())  # type: ignore[arg-type]
+
+    with caplog.at_level(logging.WARNING):
+        await handle.unsubscribe()
+
+    assert not caplog.records
+    assert not handle.active
 
 
 @pytest.mark.asyncio

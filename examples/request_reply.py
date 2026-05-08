@@ -30,14 +30,23 @@ async def main() -> None:
                 "result": result,
                 "operation": operation,
                 "inputs": {"a": a, "b": b},
-                "timestamp": int(time() * 1000)
+                "timestamp": int(time() * 1000),
             }
 
         await hub.math.calculator.serve(handler)
         await asyncio.sleep(1)
-        print("Addition result:", await hub.math.calculator.request({"operation": "add", "a": 10, "b": 5}))
-        print("Multiplication result:", await hub.math.calculator.request({"operation": "multiply", "a": 7, "b": 3}))
-        print("Division result:", await hub.math.calculator.request({"operation": "divide", "a": 20, "b": 4}))
+        print(
+            "Addition result:",
+            await hub.math.calculator.request({"operation": "add", "a": 10, "b": 5}),
+        )
+        print(
+            "Multiplication result:",
+            await hub.math.calculator.request({"operation": "multiply", "a": 7, "b": 3}),
+        )
+        print(
+            "Division result:",
+            await hub.math.calculator.request({"operation": "divide", "a": 20, "b": 4}),
+        )
 
         try:
             await hub.math.calculator.request({"operation": "invalid", "a": 1, "b": 2})

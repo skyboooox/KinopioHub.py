@@ -27,8 +27,13 @@ classifiers = [
 ]
 dependencies = [
   "aiohttp>=3.10",
+  "cryptography>=42.0.0",
   "nats-py>=2.14.0",
+  "zeroconf>=0.136.0",
 ]
+
+[project.scripts]
+kinopio-hub = "kinopio_hub._cli:main"
 
 [project.optional-dependencies]
 dev = [
@@ -47,9 +52,21 @@ Issues = "https://github.com/skyboooox/KinopioHub/issues"
 [tool.hatch.build.targets.wheel]
 packages = ["src/kinopio_hub"]
 
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src/kinopio_hub",
+  "/examples",
+  "/README_CN.md",
+  "/How_To_Dev.md",
+]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+  "integration: exercises real NATS processes or network coordination flows",
+  "slow: slower integration coverage such as local leaf runtime and auto-leaf election",
+]
 
 [tool.ruff]
 line-length = 100
