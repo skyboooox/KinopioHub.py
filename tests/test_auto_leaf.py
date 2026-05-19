@@ -62,7 +62,7 @@ def test_auto_leaf_elects_single_leader_and_emits_js_friendly_manifest(
         lambda servers: rtt_map.get(tuple(servers)),
     )
 
-    namespace = f"phase5-{uuid.uuid4().hex[:8]}"
+    namespace = f"auto-leaf-{uuid.uuid4().hex[:8]}"
     leader_options = AutoLeafOptions(
         discovery_namespace=namespace,
         backbone_servers=(leader_backbone,),
@@ -127,7 +127,7 @@ def test_auto_leaf_follower_takes_over_after_leader_missing_grace(
         lambda servers: 10.0 if tuple(servers) == (leader_backbone,) else 20.0,
     )
 
-    namespace = f"phase5-takeover-{uuid.uuid4().hex[:8]}"
+    namespace = f"auto-leaf-takeover-{uuid.uuid4().hex[:8]}"
     leader_options = AutoLeafOptions(
         discovery_namespace=namespace,
         backbone_servers=(leader_backbone,),
@@ -165,7 +165,7 @@ def test_auto_leaf_requires_sustained_advantage_before_preempting(
         lambda servers: 80.0 if tuple(servers) == (slow_backbone,) else 10.0,
     )
 
-    namespace = f"phase5-preempt-{uuid.uuid4().hex[:8]}"
+    namespace = f"auto-leaf-preempt-{uuid.uuid4().hex[:8]}"
     incumbent_options = AutoLeafOptions(
         discovery_namespace=namespace,
         backbone_servers=(slow_backbone,),

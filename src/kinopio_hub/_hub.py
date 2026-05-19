@@ -161,7 +161,7 @@ class KinopioHub:
         ws_connection_headers: Mapping[str, Sequence[str]] | None = None,
         name: str | None = None,
     ) -> None:
-        self._servers = tuple(servers or ["wss://demo.nats.io:8443", "wss://demo.nats.io:4443"])
+        self._servers = tuple(servers or ["nats://demo.nats.io:4222"])
         self._debug = debug
         self._no_echo = no_echo
         self._no_randomize = no_randomize
@@ -646,8 +646,6 @@ class KinopioHub:
             random.shuffle(shuffled_servers)
             return tuple(shuffled_servers)
 
-        # Phase 1 only establishes the explicit strategy layer. Latency probing
-        # keeps caller-provided order until phase-2 probe results are applied.
         return tuple(raw_servers)
 
     def _build_connection_plan(

@@ -109,6 +109,7 @@ def unused_nats_url() -> str:
 def test_default_server_selection_mode_preserves_legacy_order() -> None:
     hub = KinopioHub(wait_on_first_connect=False)
 
+    assert hub.servers == ("nats://demo.nats.io:4222",)
     assert hub._server_selection_mode == "ordered"
     assert hub._connection_plan.raw_servers == hub.servers
     assert hub._connection_plan.candidate_servers == hub.servers

@@ -21,10 +21,9 @@
 pip install kinopio-hub
 ```
 
-默认安装现在也会包含 `kinopio_hub.leaf` 所需的运行时依赖，但本地 `nats-server`
-二进制仍然只会在真正启用 leaf runtime 时按需解析或下载，不会在 `pip install`
-阶段偷偷执行。安装后还会自动带上 `kinopio-hub` console script，用于本地 leaf
-runtime 的 CLI 启动方式。
+默认安装包含 `kinopio_hub.leaf` 所需的运行时依赖，但本地 `nats-server` 二进制仍然只会
+在真正启用 leaf runtime 时按需解析或下载，不会在 `pip install` 时自动执行。安装后
+会提供 `kinopio-hub` console script，用于本地 leaf runtime 的 CLI 启动方式。
 
 ## 快速开始
 
@@ -36,7 +35,7 @@ from kinopio_hub import KinopioHub
 
 async def main() -> None:
     hub = KinopioHub(
-        servers=["wss://demo.nats.io:8443"],
+        servers=["nats://demo.nats.io:4222"],
         debug=True,
     )
 
@@ -63,7 +62,7 @@ asyncio.run(main())
 
 ```python
 hub = KinopioHub(
-    servers=["wss://demo.nats.io:8443"],
+    servers=["nats://demo.nats.io:4222"],
     debug=True,
     no_echo=False,
     reconnect_timeout=5.0,
@@ -105,7 +104,7 @@ await hub.math.calculator.serve(lambda request, _message: {"result": request["a"
 
 | 选项 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `servers` | `Sequence[str]` | `["wss://demo.nats.io:8443", "wss://demo.nats.io:4443"]` | NATS 服务端地址列表 |
+| `servers` | `Sequence[str]` | `["nats://demo.nats.io:4222"]` | NATS 服务端地址列表 |
 | `debug` | `bool` | `False` | 是否启用调试日志 |
 | `no_echo` | `bool` | `False` | 是否忽略当前客户端自己发布的消息 |
 | `server_selection_mode` | `"ordered" \| "random" \| "latency"` | `None` | 显式指定多服务端选择策略 |
@@ -145,6 +144,10 @@ await hub.math.calculator.serve(lambda request, _message: {"result": request["a"
 还需要同时设置 `tls_handshake_first=True`。这类端点不会先明文发送初始 `INFO`，而是
 要求客户端先完成 TLS 握手。
 
+与 KinopioHub.JS 配合使用时，传输层约定要保持清晰：JS 客户端使用 WebSocket 或安全
+WebSocket 端点，Python 客户端使用原生 NATS TCP 或 TCP/TLS 端点。跨实现兼容依赖一致
+的 subject 和序列化 payload，而不是要求两边使用同一种传输。
+
 ## 连接管理
 
 ```python
@@ -169,8 +172,8 @@ stop()
 
 ## 本地 Leaf Runtime
 
-阶段四新增了独立的 `kinopio_hub.leaf` 子模块，用于手动拉起本地 leaf runtime，
-同时不改变主 `KinopioHub` 的根导出面。
+独立的 `kinopio_hub.leaf` 子模块用于手动拉起本地 leaf runtime，同时不改变主
+`KinopioHub` 的根导出面。
 
 ```python
 import ssl
@@ -211,15 +214,15 @@ leaf runtime 的支持边界是“能启动本地 `nats-server` 子进程，并�
 socket 的环境”；受限浏览器运行时和无本地进程能力的 serverless 环境不在当前支持
 范围内。
 
-手动 leaf runtime 产出的 discovery manifest 现在也会带上 JS 侧可直接识别的租约元数据，
-包括 `expiresAt`、`leaseExpiresAt`、`leaderEpoch`、`isLeader` 和 `candidateRole`，
-这样即使不启用自动选主 runtime，浏览器侧消费者也能先把它规范化处理。
+手动 leaf runtime 产出的 discovery manifest 会带上 JS 侧可直接识别的租约元数据，包括
+`expiresAt`、`leaseExpiresAt`、`leaderEpoch`、`isLeader` 和 `candidateRole`，这样即使
+不启用自动选主 runtime，浏览器侧消费者也能先把它规范化处理。
 
 ## 自动 Leaf
 
-阶段五在手动 runtime 之上新增了 `enable_auto_leaf()`。它会用 UDP 组播心跳作为基础
-协调层，在 `zeroconf` 可用时额外做 mDNS leader 广播，把稳定 `node_id` 落到
-KinopioHub 用户缓存目录，并通过一个更高层的状态面暴露发现、跟随和接管行为。
+`enable_auto_leaf()` 构建在手动 runtime 之上。它会用 UDP 组播心跳作为基础协调层，
+在 `zeroconf` 可用时额外做 mDNS leader 广播，把稳定 `node_id` 落到 KinopioHub
+用户缓存目录，并通过一个更高层的状态面暴露发现、跟随和接管行为。
 
 ```python
 import time
@@ -255,7 +258,7 @@ finally:
 - `stopped`
 
 `AutoLeafHandle` 还提供 `state()`、`role()`、`current_leader()`、`status()` 和 `stop()`。
-leader discovery manifest 现在会包含面向 JS 兼容的字段：`version`、`expiresAt`、
+leader discovery manifest 会包含面向 JS 兼容的字段：`version`、`expiresAt`、
 `leaderEpoch`、`advertisedHostname`、`wssUrl`、`fallbackServers`、`backboneRttMs`、
 `discoveryUrl`、`leaseExpiresAt`、`nodeId`、`discoveryNamespace`、`isLeader`、
 `candidateRole`。健康 leader 不会被立即抢主；只有当另一节点在 backbone RTT 上持续
@@ -265,7 +268,7 @@ Python 侧本身不会直接实现 JS 包里的浏览器 local probe，但会产
 
 ## CLI
 
-阶段六还补齐了 `kinopio-hub` console script，对外暴露两条 leaf 相关命令：
+`kinopio-hub` console script 对外暴露两条 leaf 相关命令：
 
 ```bash
 kinopio-hub leaf start \

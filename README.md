@@ -21,7 +21,7 @@ Cloud-native communication middleware for working with remote variables and func
 pip install kinopio-hub
 ```
 
-The default install now also includes the runtime dependencies used by `kinopio_hub.leaf`.
+The default install includes the runtime dependencies used by `kinopio_hub.leaf`.
 The local `nats-server` binary is still resolved lazily at runtime and is never downloaded during
 `pip install`. The package also installs the `kinopio-hub` console script for local leaf runtime
 operations.
@@ -36,7 +36,7 @@ from kinopio_hub import KinopioHub
 
 async def main() -> None:
     hub = KinopioHub(
-        servers=["wss://demo.nats.io:8443"],
+        servers=["nats://demo.nats.io:4222"],
         debug=True,
     )
 
@@ -63,7 +63,7 @@ asyncio.run(main())
 
 ```python
 hub = KinopioHub(
-    servers=["wss://demo.nats.io:8443"],
+    servers=["nats://demo.nats.io:4222"],
     debug=True,
     no_echo=False,
     reconnect_timeout=5.0,
@@ -105,7 +105,7 @@ Every variable exposes `value`, which contains the latest known value seen local
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
-| `servers` | `Sequence[str]` | `["wss://demo.nats.io:8443", "wss://demo.nats.io:4443"]` | NATS server URLs |
+| `servers` | `Sequence[str]` | `["nats://demo.nats.io:4222"]` | NATS server URLs |
 | `debug` | `bool` | `False` | Enable debug logging |
 | `no_echo` | `bool` | `False` | Do not receive messages published by the same client |
 | `server_selection_mode` | `"ordered" \| "random" \| "latency"` | `None` | Explicit multi-server selection strategy |
@@ -146,6 +146,11 @@ If your NATS servers are configured with TLS-first handshakes (`tls.handshake_fi
 server side), also set `tls_handshake_first=True`. Those endpoints do not send the initial `INFO`
 line in clear text before the TLS upgrade.
 
+When pairing this Python package with KinopioHub.JS, keep the transport roles explicit: JS clients
+use WebSocket or secure WebSocket endpoints, while Python clients use native NATS TCP or TCP/TLS
+endpoints. Cross-implementation compatibility comes from matching subjects and serialized payloads,
+not from using the same transport.
+
 ## Connection Management
 
 ```python
@@ -170,8 +175,8 @@ stop()
 
 ## Local Leaf Runtime
 
-Stage 4 adds a separate `kinopio_hub.leaf` module for manually starting a local leaf runtime
-without changing the main `KinopioHub` export surface.
+The separate `kinopio_hub.leaf` module starts a local leaf runtime without changing the main
+`KinopioHub` export surface.
 
 ```python
 import ssl
@@ -218,10 +223,10 @@ consumers can normalize it without requiring the auto-election runtime.
 
 ## Auto Leaf
 
-Stage 5 adds `enable_auto_leaf()` on top of the manual runtime. It uses UDP multicast heartbeats as
-the base coordination layer, optionally advertises the leader via mDNS when `zeroconf` is
-available, keeps a stable `node_id` under the KinopioHub user cache, and exposes a high-level
-status API for leader discovery and failover.
+`enable_auto_leaf()` builds on the manual runtime. It uses UDP multicast heartbeats as the base
+coordination layer, optionally advertises the leader via mDNS when `zeroconf` is available, keeps a
+stable `node_id` under the KinopioHub user cache, and exposes a high-level status API for leader
+discovery and failover.
 
 ```python
 import time
@@ -257,7 +262,7 @@ The public state machine is:
 - `stopped`
 
 `AutoLeafHandle` also exposes `state()`, `role()`, `current_leader()`, `status()`, and `stop()`.
-Leader discovery manifests now include the JS-facing fields `version`, `expiresAt`,
+Leader discovery manifests include the JS-facing fields `version`, `expiresAt`,
 `leaderEpoch`, `advertisedHostname`, `wssUrl`, `fallbackServers`, `backboneRttMs`,
 `discoveryUrl`, `leaseExpiresAt`, `nodeId`, `discoveryNamespace`, `isLeader`, and
 `candidateRole`. A healthier leader will not be preempted immediately; another node must stay at
@@ -267,7 +272,7 @@ does emit a compatible discovery manifest that browser clients can consume.
 
 ## CLI
 
-Stage 6 also exposes a `kinopio-hub` console script for the two public leaf workflows:
+The `kinopio-hub` console script exposes the two public leaf workflows:
 
 ```bash
 kinopio-hub leaf start \
