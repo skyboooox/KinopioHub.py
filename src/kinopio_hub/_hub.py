@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import random
+import ssl
 from dataclasses import dataclass, replace
 from enum import Enum
 from time import perf_counter, time
@@ -50,6 +51,14 @@ class KinopioCodec(Protocol):
 
     def decode(self, payload: bytes) -> Any:
         ...
+
+
+def _normalize_tls_option(tls: ssl.SSLContext | bool | None) -> ssl.SSLContext | None:
+    if tls is True:
+        return ssl.create_default_context()
+    if tls is False:
+        return None
+    return tls
 
 
 @dataclass(frozen=True)
@@ -155,7 +164,7 @@ class KinopioHub:
         codec: KinopioCodec | None = None,
         json_default: JSONDefault | None = None,
         json_object_hook: JSONObjectHook | None = None,
-        tls: Any | None = None,
+        tls: ssl.SSLContext | bool | None = None,
         tls_hostname: str | None = None,
         tls_handshake_first: bool = False,
         ws_connection_headers: Mapping[str, Sequence[str]] | None = None,
@@ -183,7 +192,7 @@ class KinopioHub:
         self._codec = codec
         self._json_default = json_default
         self._json_object_hook = json_object_hook
-        self._tls = tls
+        self._tls = _normalize_tls_option(tls)
         self._tls_hostname = tls_hostname
         self._tls_handshake_first = tls_handshake_first
         self._ws_connection_headers = (

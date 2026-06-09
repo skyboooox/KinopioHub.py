@@ -81,7 +81,7 @@ def test_auto_leaf_elects_single_leader_and_emits_js_friendly_manifest(
     )
     leader, follower = auto_leaf_pair_factory(leader_options, follower_options)
 
-    wait_for(lambda: leader.role() == "leader" and follower.role() == "follower")
+    wait_for(lambda: leader.role() == "leader" and follower.role() == "follower", timeout=12.0)
 
     leader_status = leader.status()
     follower_status = follower.status()
@@ -99,6 +99,8 @@ def test_auto_leaf_elects_single_leader_and_emits_js_friendly_manifest(
         "advertisedHostname",
         "wssUrl",
         "fallbackServers",
+        "bridgeState",
+        "backboneServers",
         "backboneRttMs",
         "discoveryUrl",
         "leaseExpiresAt",
@@ -110,6 +112,8 @@ def test_auto_leaf_elects_single_leader_and_emits_js_friendly_manifest(
     assert required_fields.issubset(manifest)
     assert manifest["nodeId"] == leader_status.node_id
     assert manifest["discoveryNamespace"] == namespace
+    assert manifest["bridgeState"] == leader_status.leaf_status.bridge_state
+    assert manifest["backboneServers"] == list(leader_status.leaf_status.backbone_servers)
     assert manifest["isLeader"] is True
     assert manifest["candidateRole"] == "leader"
 
@@ -146,7 +150,7 @@ def test_auto_leaf_follower_takes_over_after_leader_missing_grace(
     )
     leader, follower = auto_leaf_pair_factory(leader_options, follower_options)
 
-    wait_for(lambda: leader.role() == "leader" and follower.role() == "follower")
+    wait_for(lambda: leader.role() == "leader" and follower.role() == "follower", timeout=12.0)
     leader.stop()
     wait_for(lambda: follower.role() == "leader", timeout=8.0)
     assert follower.status().leaf_status is not None

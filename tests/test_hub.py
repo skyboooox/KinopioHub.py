@@ -115,6 +115,26 @@ def test_default_server_selection_mode_preserves_legacy_order() -> None:
     assert hub._connection_plan.candidate_servers == hub.servers
 
 
+def test_tls_true_uses_default_ssl_context() -> None:
+    hub = KinopioHub(
+        servers=["tls://example.com:4222"],
+        tls=True,
+        wait_on_first_connect=False,
+    )
+
+    assert isinstance(hub._tls, ssl.SSLContext)
+
+
+def test_tls_false_disables_tls_context() -> None:
+    hub = KinopioHub(
+        servers=["nats://example.com:4222"],
+        tls=False,
+        wait_on_first_connect=False,
+    )
+
+    assert hub._tls is None
+
+
 def test_no_randomize_false_maps_to_random_mode() -> None:
     hub = KinopioHub(
         servers=["nats://server-a:4222", "nats://server-b:4222"],

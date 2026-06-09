@@ -350,6 +350,7 @@ class AutoLeafHandle:
         if leaf_handle is None:
             raise RuntimeError("leader manifest requested before local leaf runtime exists")
 
+        leaf_status = leaf_handle.status()
         lease_expires_at = _lease_expiry_timestamp(now)
         return {
             "version": 1,
@@ -360,6 +361,8 @@ class AutoLeafHandle:
             "clientUrl": leaf_handle.client_url,
             "monitorUrl": leaf_handle.monitor_url,
             "fallbackServers": [leaf_handle.wss_url],
+            "bridgeState": leaf_status.bridge_state,
+            "backboneServers": list(leaf_status.backbone_servers),
             "backboneRttMs": self._backbone_rtt_ms,
             "discoveryUrl": leaf_handle.discovery_url,
             "leaseExpiresAt": lease_expires_at,

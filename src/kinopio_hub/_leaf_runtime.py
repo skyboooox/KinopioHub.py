@@ -507,7 +507,7 @@ def _build_nats_config(
         lines.extend(
             [
                 "leafnodes {",
-                "  reconnect: 1",
+                "  reconnect: 1s",
                 "  remotes = [",
                 "    {",
                 f"      urls: [{rendered_urls}]",

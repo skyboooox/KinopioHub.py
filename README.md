@@ -125,7 +125,7 @@ Every variable exposes `value`, which contains the latest known value seen local
 | `codec` | `KinopioCodec` | `None` | Custom codec with `encode()` and `decode()` |
 | `json_default` | `Callable` | `None` | Fallback hook for `json.dumps()` |
 | `json_object_hook` | `Callable` | `None` | Fallback hook for `json.loads()` |
-| `tls` | `ssl.SSLContext` | `None` | Custom TLS context |
+| `tls` | `ssl.SSLContext \| bool` | `None` | Custom TLS context, or `True` to use the default system trust context |
 | `tls_hostname` | `str` | `None` | Explicit TLS hostname override |
 | `tls_handshake_first` | `bool` | `False` | Use a TLS-first handshake for servers configured with `handshake_first: true` |
 | `ws_connection_headers` | `Mapping[str, Sequence[str]]` | `None` | Extra headers for WebSocket transport |
@@ -144,7 +144,9 @@ subscriptions, services, and `value` tracking continue to be maintained.
 
 If your NATS servers are configured with TLS-first handshakes (`tls.handshake_first: true` on the
 server side), also set `tls_handshake_first=True`. Those endpoints do not send the initial `INFO`
-line in clear text before the TLS upgrade.
+line in clear text before the TLS upgrade. For public CA certificates, `tls=True` uses Python's
+default system trust context. For self-signed or private CA certificates, pass a custom
+`ssl.SSLContext`.
 
 When pairing this Python package with KinopioHub.JS, keep the transport roles explicit: JS clients
 use WebSocket or secure WebSocket endpoints, while Python clients use native NATS TCP or TCP/TLS
@@ -263,9 +265,9 @@ The public state machine is:
 
 `AutoLeafHandle` also exposes `state()`, `role()`, `current_leader()`, `status()`, and `stop()`.
 Leader discovery manifests include the JS-facing fields `version`, `expiresAt`,
-`leaderEpoch`, `advertisedHostname`, `wssUrl`, `fallbackServers`, `backboneRttMs`,
-`discoveryUrl`, `leaseExpiresAt`, `nodeId`, `discoveryNamespace`, `isLeader`, and
-`candidateRole`. A healthier leader will not be preempted immediately; another node must stay at
+`leaderEpoch`, `advertisedHostname`, `wssUrl`, `fallbackServers`, `bridgeState`,
+`backboneServers`, `backboneRttMs`, `discoveryUrl`, `leaseExpiresAt`, `nodeId`,
+`discoveryNamespace`, `isLeader`, and `candidateRole`. A healthier leader will not be preempted immediately; another node must stay at
 least 50ms ahead in measured backbone RTT for a sustained window before it can take over.
 KinopioHub itself does not implement the browser-side local probe used by the JS package, but it
 does emit a compatible discovery manifest that browser clients can consume.

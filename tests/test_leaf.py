@@ -5,12 +5,14 @@ import json
 import socket
 import ssl
 from pathlib import Path
-from typing import Any, Callable
+from types import SimpleNamespace
+from typing import Any, Callable, cast
 from urllib.request import urlopen
 
 import pytest
 
 from kinopio_hub import KinopioHub
+from kinopio_hub._leaf_runtime import _build_nats_config
 from kinopio_hub.leaf import LeafNodeOptions
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
@@ -31,12 +33,49 @@ async def wait_for(
     raise AssertionError("condition was not met in time")
 
 
+async def request_until_responds(
+    request: Callable[[], Any],
+    *,
+    timeout: float = 5.0,
+    interval: float = 0.1,
+) -> Any:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    last_error: BaseException | None = None
+    while loop.time() < deadline:
+        try:
+            return await request()
+        except Exception as exc:
+            last_error = exc
+            await asyncio.sleep(interval)
+    raise AssertionError("request did not receive a responder in time") from last_error
+
+
 def unused_nats_url() -> str:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         sock.listen(1)
         port = int(sock.getsockname()[1])
     return f"nats://127.0.0.1:{port}"
+
+
+def test_leaf_runtime_config_uses_explicit_reconnect_duration() -> None:
+    config = _build_nats_config(
+        name="kinopio-test-leaf",
+        client_host="127.0.0.1",
+        client_port=4222,
+        monitor_host="127.0.0.1",
+        monitor_port=8222,
+        websocket_host="127.0.0.1",
+        websocket_port=8080,
+        tls_materials=cast(
+            Any,
+            SimpleNamespace(cert_file=Path("/tmp/cert.pem"), key_file=Path("/tmp/key.pem")),
+        ),
+        backbone_servers=("tls://hub.skyboooox.com:17222",),
+    )
+
+    assert "  reconnect: 1s\n" in config
 
 
 @pytest.mark.asyncio
@@ -90,7 +129,9 @@ async def test_leaf_runtime_exposes_wss_discovery_and_backbone_bridge(
             await asyncio.wait_for(inbound_event.wait(), timeout=5)
 
             await upstream_client.math.add.serve(add_handler)
-            response = await local_client.math.add.request({"a": 2, "b": 5})
+            response = await request_until_responds(
+                lambda: local_client.math.add.request({"a": 2, "b": 5})
+            )
 
         assert inbound_messages == [{"message": "hello-leaf"}]
         assert response == {"sum": 7}

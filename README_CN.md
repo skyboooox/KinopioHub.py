@@ -124,7 +124,7 @@ await hub.math.calculator.serve(lambda request, _message: {"result": request["a"
 | `codec` | `KinopioCodec` | `None` | 自定义 `encode()` / `decode()` 编解码器 |
 | `json_default` | `Callable` | `None` | `json.dumps()` 回退钩子 |
 | `json_object_hook` | `Callable` | `None` | `json.loads()` 回退钩子 |
-| `tls` | `ssl.SSLContext` | `None` | 自定义 TLS 上下文 |
+| `tls` | `ssl.SSLContext \| bool` | `None` | 自定义 TLS 上下文；也可以传 `True` 使用系统默认信任上下文 |
 | `tls_hostname` | `str` | `None` | 显式 TLS 主机名 |
 | `tls_handshake_first` | `bool` | `False` | 对启用了 `handshake_first: true` 的服务端使用 TLS-first 握手 |
 | `ws_connection_headers` | `Mapping[str, Sequence[str]]` | `None` | WebSocket 连接附加头 |
@@ -142,7 +142,8 @@ await hub.math.calculator.serve(lambda request, _message: {"result": request["a"
 
 如果你的 NATS 服务端启用了 TLS-first 握手（服务端侧配置了 `tls.handshake_first: true`），
 还需要同时设置 `tls_handshake_first=True`。这类端点不会先明文发送初始 `INFO`，而是
-要求客户端先完成 TLS 握手。
+要求客户端先完成 TLS 握手。使用公有 CA 证书时，`tls=True` 会使用 Python 的系统默认
+信任上下文；如果是自签或私有 CA 证书，请传入自定义 `ssl.SSLContext`。
 
 与 KinopioHub.JS 配合使用时，传输层约定要保持清晰：JS 客户端使用 WebSocket 或安全
 WebSocket 端点，Python 客户端使用原生 NATS TCP 或 TCP/TLS 端点。跨实现兼容依赖一致
@@ -259,9 +260,9 @@ finally:
 
 `AutoLeafHandle` 还提供 `state()`、`role()`、`current_leader()`、`status()` 和 `stop()`。
 leader discovery manifest 会包含面向 JS 兼容的字段：`version`、`expiresAt`、
-`leaderEpoch`、`advertisedHostname`、`wssUrl`、`fallbackServers`、`backboneRttMs`、
-`discoveryUrl`、`leaseExpiresAt`、`nodeId`、`discoveryNamespace`、`isLeader`、
-`candidateRole`。健康 leader 不会被立即抢主；只有当另一节点在 backbone RTT 上持续
+`leaderEpoch`、`advertisedHostname`、`wssUrl`、`fallbackServers`、`bridgeState`、
+`backboneServers`、`backboneRttMs`、`discoveryUrl`、`leaseExpiresAt`、`nodeId`、
+`discoveryNamespace`、`isLeader`、`candidateRole`。健康 leader 不会被立即抢主；只有当另一节点在 backbone RTT 上持续
 至少领先 50ms 一段时间后，才允许执行接管。
 Python 侧本身不会直接实现 JS 包里的浏览器 local probe，但会产出可被浏览器客户端
 继续消费的兼容 discovery manifest。
