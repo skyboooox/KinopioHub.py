@@ -1,1102 +1,328 @@
-from __future__ import annotations
 
+from kinopio_hub._compat import timeout as async_timeout
 import asyncio
-import json
-import socket
-import ssl
-from dataclasses import dataclass
 from typing import Any, cast
-from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from kinopio_hub import ConnectionState, KinopioHub
-from kinopio_hub._hub import _ServerProbeResult
+from kinopio_hub import KinopioError, KinopioHub, UNSET
+from kinopio_hub import _protocol as p
 
 
-async def wait_for(predicate: Any, *, timeout: float = 5.0, interval: float = 0.05) -> None:
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
-    while loop.time() < deadline:
-        if predicate():
-            return
-        await asyncio.sleep(interval)
-    raise AssertionError("condition was not met in time")
+async def test_ram_snapshots_and_independent_watchers():
+    async with KinopioHub(mesh=False, servers=[], peer_timeout=0.01) as hub:
+        ref = hub.scope("room").var("temperature")
+        assert hub.scope("room").var("temperature") is ref
+        assert ref.value is UNSET
+        values = []
+
+        def callback(value, meta):
+            values.append(value)
+
+        first = ref.watch(callback)
+        second = ref.watch(callback)
+        await ref.set({"x": [1]})
+        assert values == [{"x": [1]}, {"x": [1]}]
+        snapshot = cast(dict[str, Any], ref.value)
+        snapshot["x"].append(2)
+        assert ref.value == {"x": [1]}
+        first()
+        await ref.set(None)
+        assert ref.value is None
+        assert values[-1] is None
+        second()
+        await ref.delete()
+        assert ref.value is UNSET and ref.meta["exists"] is False
+        assert ref.meta["pending"]
+    assert ref.value is UNSET
+    with pytest.raises(KinopioError, match="closed"):
+        await ref.set(1)
 
 
-async def wait_for_active_server(
-    hub: KinopioHub,
-    server: str,
-    *,
-    timeout: float = 5.0,
-) -> None:
-    await wait_for(
-        lambda: hub._connection_plan.active_server == server and hub.is_connected,
-        timeout=timeout,
-    )
+async def test_discovery_empty_and_close_waiters():
+    hub = KinopioHub(mesh=False, servers=[], peer_timeout=0.01)
+    ref = hub.scope("s").var("v")
+    await ref.ready()
+    assert ref.meta["initialized"] and ref.meta["exists"] is False
+    task = asyncio.create_task(hub.connected(timeout=2))
+    await asyncio.sleep(0.01)
+    await hub.close()
+    with pytest.raises(KinopioError) as error:
+        await task
+    assert error.value.code == "CLOSED"
 
 
-def probe_result(
-    server: str,
-    original_index: int,
-    round_trip_ms: float,
-    *,
-    available: bool = True,
-    error: str | None = None,
-) -> _ServerProbeResult:
-    return _ServerProbeResult(
-        server=server,
-        original_index=original_index,
-        available=available,
-        round_trip_ms=round_trip_ms if available else None,
-        error=error,
-    )
+async def test_capacity_collision_and_clock_rollback():
+    async with KinopioHub(mesh=False, servers=[], max_variables=1) as hub:
+        ref = hub.scope("s").var("v")
+        await ref.set(1)
+        with pytest.raises(KinopioError):
+            hub.scope("s").var("another")
+        original = p.copy(hub.store.records[ref.key])
+        bad = {**original, "value": 2}
+        with pytest.raises(KinopioError) as error:
+            hub.store._commit(bad)
+        assert error.value.code == "VERSION_COLLISION"
+        hub.options["max_memory_bytes"] = 1
+        with pytest.raises(KinopioError):
+            await ref.set(3)
+        assert ref.value == 1 and hub.store.clock == 1
+        assert hub.store.records[ref.key] == original
 
 
-class FakeNATSConnection:
-    def __init__(
-        self,
-        connected_url: str | None = None,
-        *,
-        transport_name: str | None = None,
-        connect_error: BaseException | None = None,
-    ) -> None:
-        self.connected_url = connected_url
-        self.is_connected = True
-        self.is_closed = False
-        self.connect_error = connect_error
-        self.drain_calls = 0
-        self.close_calls = 0
-        self.connect_calls = 0
-        self._transport = type(transport_name, (), {})() if transport_name is not None else None
+async def test_callbacks_cannot_reject_write():
+    errors: list[Exception] = []
+    async with KinopioHub(mesh=False, servers=[], on_callback_error=errors.append) as hub:
+        ref = hub.scope("s").var("v")
 
-    async def connect(self, *_args: Any, **_kwargs: Any) -> None:
-        self.connect_calls += 1
-        if self.connect_error is not None:
-            raise self.connect_error
-        self.is_connected = True
+        def bad(value, meta):
+            raise RuntimeError("observer")
 
-    async def flush(self, timeout: int) -> None:
-        return None
+        ref.watch(bad)
+        await ref.set(1)
+        assert ref.value == 1 and len(errors) == 1
 
-    async def drain(self) -> None:
-        self.drain_calls += 1
-        self.is_connected = False
-        self.is_closed = True
+        async def asynchronous(value, meta):
+            pass
 
-    async def close(self) -> None:
-        self.close_calls += 1
-        self.is_connected = False
-        self.is_closed = True
+        with pytest.raises(TypeError):
+            ref.watch(asynchronous)
 
 
-class FakeClientSession:
-    def __init__(self) -> None:
-        self.close_calls = 0
-
-    async def close(self) -> None:
-        self.close_calls += 1
+def test_construction_outside_loop():
+    hub = KinopioHub(mesh=False, servers=[])
+    assert hub._start_task is None
+    asyncio.run(hub.close())
 
 
-def unused_nats_url() -> str:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        sock.listen(1)
-        port = int(sock.getsockname()[1])
-    return f"nats://127.0.0.1:{port}"
+@pytest.mark.parametrize("websocket", [False, True])
+async def test_real_broker_replication_and_peer_snapshot(websocket):
+    from kinopio_hub._broker import start_managed_broker
 
-
-def test_default_server_selection_mode_preserves_legacy_order() -> None:
-    hub = KinopioHub(wait_on_first_connect=False)
-
-    assert hub.servers == ("nats://demo.nats.io:4222",)
-    assert hub._server_selection_mode == "ordered"
-    assert hub._connection_plan.raw_servers == hub.servers
-    assert hub._connection_plan.candidate_servers == hub.servers
-
-
-def test_tls_true_uses_default_ssl_context() -> None:
-    hub = KinopioHub(
-        servers=["tls://example.com:4222"],
-        tls=True,
-        wait_on_first_connect=False,
-    )
-
-    assert isinstance(hub._tls, ssl.SSLContext)
-
-
-def test_tls_false_disables_tls_context() -> None:
-    hub = KinopioHub(
-        servers=["nats://example.com:4222"],
-        tls=False,
-        wait_on_first_connect=False,
-    )
-
-    assert hub._tls is None
-
-
-def test_no_randomize_false_maps_to_random_mode() -> None:
-    hub = KinopioHub(
-        servers=["nats://server-a:4222", "nats://server-b:4222"],
-        no_randomize=False,
-        wait_on_first_connect=False,
-    )
-
-    assert hub._server_selection_mode == "random"
-
-
-def test_explicit_server_selection_mode_overrides_legacy_flag() -> None:
-    hub = KinopioHub(
-        servers=["nats://server-a:4222", "nats://server-b:4222"],
-        server_selection_mode="ordered",
-        no_randomize=False,
-        wait_on_first_connect=False,
-    )
-
-    assert hub._server_selection_mode == "ordered"
-    assert hub._connection_plan.candidate_servers == (
-        "nats://server-a:4222",
-        "nats://server-b:4222",
-    )
-
-
-def test_latency_mode_enables_background_probe_for_multi_server() -> None:
-    hub = KinopioHub(
-        servers=["nats://server-a:4222", "nats://server-b:4222"],
-        server_selection_mode="latency",
-        wait_on_first_connect=False,
-    )
-
-    assert hub._connection_plan.server_selection_mode == "latency"
-    assert hub._connection_plan.candidate_servers == (
-        "nats://server-a:4222",
-        "nats://server-b:4222",
-    )
-    assert hub._connection_plan.background_probe_enabled is True
-
-
-def test_latency_probe_order_keeps_equal_rtt_servers_in_input_order() -> None:
-    hub = KinopioHub(
-        servers=[
-            "nats://server-a:4222",
-            "nats://server-b:4222",
-            "nats://server-c:4222",
-        ],
-        server_selection_mode="latency",
-        wait_on_first_connect=False,
-    )
-
-    ordered = hub._order_servers_by_probe_results(
-        hub.servers,
-        (
-            _ServerProbeResult(
-                server="nats://server-a:4222",
-                original_index=0,
-                available=True,
-                round_trip_ms=10.0,
-            ),
-            _ServerProbeResult(
-                server="nats://server-b:4222",
-                original_index=1,
-                available=True,
-                round_trip_ms=10.0,
-            ),
-            _ServerProbeResult(
-                server="nats://server-c:4222",
-                original_index=2,
-                available=False,
-                round_trip_ms=None,
-                error="OSError: unreachable",
-            ),
-        ),
-    )
-
-    assert ordered == (
-        "nats://server-a:4222",
-        "nats://server-b:4222",
-        "nats://server-c:4222",
-    )
-
-
-def test_invalid_server_selection_mode_raises_value_error() -> None:
-    with pytest.raises(
-        ValueError,
-        match="server_selection_mode must be one of 'ordered', 'random', or 'latency'",
-    ):
-        KinopioHub(
-            server_selection_mode=cast(Any, "fastest"),
-            wait_on_first_connect=False,
-        )
-
-
-@pytest.mark.asyncio
-async def test_random_server_selection_mode_reorders_candidates_before_connect() -> None:
-    hub = KinopioHub(
-        servers=["nats://server-a:4222", "nats://server-b:4222"],
-        server_selection_mode="random",
-        wait_on_first_connect=False,
-        auto_retry=False,
-        health_report=0,
-    )
-
-    fake_nc = FakeNATSConnection("nats://server-b:4222")
-
+    broker = await start_managed_broker(host="127.0.0.1")
+    url = broker.websocket_url if websocket else broker.url
+    one = KinopioHub(mesh=False, servers=[url], peer_timeout=0.1, health_interval=0.1)
+    two = None
     try:
-        with (
-            patch(
-                "kinopio_hub._hub.random.shuffle",
-                side_effect=lambda values: values.reverse(),
-            ) as shuffle_mock,
-            patch.object(
-                hub,
-                "_open_connection",
-                new=AsyncMock(return_value=fake_nc),
-            ) as connect_mock,
-        ):
-            await hub._connect_once()
-
-        assert shuffle_mock.called
-        assert connect_mock.await_count == 1
-        connect_call = connect_mock.await_args
-        assert connect_call is not None
-        assert connect_call.args[0] == (
-            "nats://server-b:4222",
-            "nats://server-a:4222",
-        )
-        assert hub._connection_plan.candidate_servers == (
-            "nats://server-b:4222",
-            "nats://server-a:4222",
-        )
-        assert hub._connection_plan.active_server == "nats://server-b:4222"
+        ref = one.scope("s").var("v")
+        await ref.set({"hello": "世界", "null": None})
+        await one.connected()
+        await one.flush()
+        assert not ref.meta["pending"]
+        two = KinopioHub(mesh=False, servers=[url], peer_timeout=0.1, health_interval=0.1)
+        other = two.scope("s").var("v")
+        await two.connected()
+        async with async_timeout(3):
+            while other.value != ref.value:
+                await asyncio.sleep(0.01)
+        await other.delete()
+        await two.flush()
+        async with async_timeout(3):
+            while ref.value is not UNSET:
+                await asyncio.sleep(0.01)
+        async with async_timeout(3):
+            while len(await one.instances.list()) < 2:
+                await asyncio.sleep(0.01)
+        assert all(row["sdk"] == "python" for row in await one.instances.list())
     finally:
-        await hub.aclose()
+        await one.close()
+        if two:
+            await two.close()
+        await broker.close()
 
 
-@pytest.mark.asyncio
-async def test_latency_server_selection_mode_reorders_candidates_before_connect() -> None:
-    hub = KinopioHub(
-        servers=[
-            "nats://server-a:4222",
-            "nats://server-b:4222",
-            "nats://server-c:4222",
-        ],
-        server_selection_mode="latency",
-        wait_on_first_connect=False,
-        auto_retry=False,
-        health_report=0,
-    )
+async def test_offline_ram_reconnect_and_empty_restart():
+    from kinopio_hub._broker import start_managed_broker
 
-    fake_nc = FakeNATSConnection("nats://server-b:4222")
-    probe_results = (
-        _ServerProbeResult(
-            server="nats://server-a:4222",
-            original_index=0,
-            available=True,
-            round_trip_ms=35.0,
-        ),
-        _ServerProbeResult(
-            server="nats://server-b:4222",
-            original_index=1,
-            available=True,
-            round_trip_ms=12.5,
-        ),
-        _ServerProbeResult(
-            server="nats://server-c:4222",
-            original_index=2,
-            available=False,
-            round_trip_ms=None,
-            error="OSError: unreachable",
-        ),
-    )
-
+    broker = await start_managed_broker(host="127.0.0.1")
+    port = broker.port
+    hub = KinopioHub(mesh=False, servers=[broker.url], probe_interval=0.05, timeout=0.2, peer_timeout=0.02)
+    ref = hub.scope("s").var("v")
+    replacement = None
     try:
-        with (
-            patch.object(
-                hub,
-                "_probe_candidate_servers",
-                new=AsyncMock(return_value=probe_results),
-            ) as probe_mock,
-            patch.object(
-                hub,
-                "_open_connection",
-                new=AsyncMock(return_value=fake_nc),
-            ) as connect_mock,
-        ):
-            await hub._connect_once()
-
-        assert probe_mock.await_count == 1
-        connect_call = connect_mock.await_args
-        assert connect_call is not None
-        assert connect_call.args[0] == (
-            "nats://server-b:4222",
-            "nats://server-a:4222",
-            "nats://server-c:4222",
-        )
-        assert hub._connection_plan.candidate_servers == (
-            "nats://server-b:4222",
-            "nats://server-a:4222",
-            "nats://server-c:4222",
-        )
-        assert hub._connection_plan.probe_results == probe_results
+        await hub.connected(timeout=3)
+        await ref.set(1)
+        await hub.flush()
+        await broker.close()
+        async with async_timeout(3):
+            while hub.status()["connection"] == "connected":
+                await asyncio.sleep(0.01)
+        await ref.set(2)
+        assert ref.value == 2 and ref.meta["pending"]
+        replacement = await start_managed_broker(host="127.0.0.1", port=port)
+        await hub.connected(timeout=3)
+        await hub.flush()
+        assert ref.value == 2 and not ref.meta["pending"]
+        assert hub.scope("s").var("v") is ref
+        writer = hub.writer
+        await hub.close()
+        async with KinopioHub(mesh=False, servers=[replacement.url], peer_timeout=0.03) as fresh:
+            await fresh.scope("s").var("v").ready()
+            assert fresh.scope("s").var("v").value is UNSET
+            assert fresh.writer != writer
     finally:
-        await hub.aclose()
+        await hub.close()
+        await broker.close()
+        if replacement:
+            await replacement.close()
 
 
-@pytest.mark.asyncio
-async def test_latency_server_selection_mode_falls_back_to_input_order_when_all_probes_fail(
-) -> None:
-    hub = KinopioHub(
-        servers=["nats://server-a:4222", "nats://server-b:4222"],
-        server_selection_mode="latency",
-        wait_on_first_connect=False,
-        auto_retry=False,
-        health_report=0,
-    )
+async def test_offline_writes_schedule_bounded_work():
+    async with KinopioHub(mesh=False, servers=[], discovery=False) as hub:
+        ref = hub.scope("s").var("v")
+        count = len(hub._tasks)
+        for index in range(2000):
+            await ref.set(index)
+        assert len(hub._tasks) == count
+        assert len(hub.store.pending) == 1 and ref.value == 1999
 
-    fake_nc = FakeNATSConnection("nats://server-a:4222")
-    probe_results = (
-        _ServerProbeResult(
-            server="nats://server-a:4222",
-            original_index=0,
-            available=False,
-            round_trip_ms=None,
-            error="OSError: timeout",
-        ),
-        _ServerProbeResult(
-            server="nats://server-b:4222",
-            original_index=1,
-            available=False,
-            round_trip_ms=None,
-            error="OSError: timeout",
-        ),
-    )
 
+def test_mesh_default_has_no_implicit_external_server():
+    hub = KinopioHub()
+    assert hub.servers == []
+    asyncio.run(hub.close())
+
+
+async def test_first_connection_does_not_wait_for_blackhole_probe():
+    from kinopio_hub._broker import start_managed_broker
+
+    closed = asyncio.Event()
+
+    async def blackhole(reader, writer):
+        try:
+            await reader.read()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+            closed.set()
+
+    server = await asyncio.start_server(blackhole, "127.0.0.1", 0)
+    broker = await start_managed_broker(host="127.0.0.1")
+    port = server.sockets[0].getsockname()[1]
     try:
-        with (
-            patch.object(
-                hub,
-                "_probe_candidate_servers",
-                new=AsyncMock(return_value=probe_results),
-            ) as probe_mock,
-            patch.object(
-                hub,
-                "_open_connection",
-                new=AsyncMock(return_value=fake_nc),
-            ) as connect_mock,
-        ):
-            await hub._connect_once()
-
-        assert probe_mock.await_count == 1
-        connect_call = connect_mock.await_args
-        assert connect_call is not None
-        assert connect_call.args[0] == (
-            "nats://server-a:4222",
-            "nats://server-b:4222",
-        )
-        assert hub._connection_plan.candidate_servers == (
-            "nats://server-a:4222",
-            "nats://server-b:4222",
-        )
-        assert hub._connection_plan.probe_results == probe_results
+        async with KinopioHub(
+            mesh=False, discovery=False, servers=[f"nats://127.0.0.1:{port}", broker.url], timeout=2
+        ) as hub:
+            await hub.connected(timeout=0.5)
+            assert hub.status()["server"] == broker.url
+        await asyncio.wait_for(closed.wait(), 1)
     finally:
-        await hub.aclose()
+        server.close()
+        await server.wait_closed()
+        await broker.close()
 
 
-@pytest.mark.asyncio
-@pytest.mark.integration
-async def test_tls_handshake_first_connects_to_tls_first_server(
-    nats_tls_first_server: Any,
-) -> None:
-    tls_context = ssl.create_default_context(cafile=str(nats_tls_first_server.ca_cert_file))
+async def test_failed_handoff_keeps_previous_connection():
+    from kinopio_hub._broker import start_managed_broker
 
-    async with KinopioHub(
-        servers=[nats_tls_first_server.tcp_url],
-        tls=tls_context,
-        tls_hostname="127.0.0.1",
-        tls_handshake_first=True,
-    ) as hub:
-        assert hub.is_connected
-        assert hub._connection_plan.active_server == nats_tls_first_server.tcp_url
-
-
-@pytest.mark.asyncio
-@pytest.mark.integration
-async def test_latency_mode_tls_handshake_first_probe_connects_to_tls_first_server(
-    nats_tls_first_server: Any,
-) -> None:
-    dead_url = unused_nats_url()
-    tls_context = ssl.create_default_context(cafile=str(nats_tls_first_server.ca_cert_file))
-    hub = KinopioHub(
-        servers=[dead_url, nats_tls_first_server.tcp_url],
-        server_selection_mode="latency",
-        reconnect_timeout=0.2,
-        wait_on_first_connect=False,
-        auto_retry=False,
-        health_report=0,
-        tls=tls_context,
-        tls_hostname="127.0.0.1",
-        tls_handshake_first=True,
-    )
-
+    one = await start_managed_broker(host="127.0.0.1")
+    two = await start_managed_broker(host="127.0.0.1")
     try:
-        await asyncio.wait_for(hub.wait_connected(), timeout=5)
+        async with KinopioHub(mesh=False, discovery=False, servers=[one.url]) as hub:
+            await hub.connected()
+            ref = hub.scope("s").var("v")
+            await ref.set("retained")
+            await hub.flush()
+            old = hub.connection.active
+            candidate = await hub.connection._probe(two.url)
+            original_flush = candidate["connection"].flush
+            calls = 0
 
-        assert hub.is_connected
-        assert hub._connection_plan.candidate_servers[0] == nats_tls_first_server.tcp_url
-        assert hub._connection_plan.active_server == nats_tls_first_server.tcp_url
+            async def fail_second_flush(*args, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise RuntimeError("handoff confirmation failed")
+                await original_flush(*args, **kwargs)
 
-        probe_results = {result.server: result for result in hub._connection_plan.probe_results}
-        assert probe_results[nats_tls_first_server.tcp_url].available is True
-        assert probe_results[nats_tls_first_server.tcp_url].round_trip_ms is not None
-        assert probe_results[dead_url].available is False
+            candidate["connection"].flush = fail_second_flush
+            with pytest.raises(RuntimeError, match="handoff"):
+                await hub.connection._activate(candidate, "test")
+            assert hub.connection.active is old and not old["connection"].is_closed
+            assert candidate["connection"].is_closed
+            assert ref.value == "retained"
+            await ref.set("still available")
+            await hub.flush()
     finally:
-        await asyncio.wait_for(hub.aclose(), timeout=5)
+        await one.close()
+        await two.close()
 
 
-@pytest.mark.asyncio
-async def test_close_connection_only_prefers_direct_close_for_websocket_connections() -> None:
-    hub = KinopioHub(
-        servers=["wss://server-a:443"],
-        wait_on_first_connect=False,
-        auto_retry=False,
-        health_report=0,
-    )
-    fake_nc = FakeNATSConnection(
-        "wss://server-a:443",
-        transport_name="WebSocketTransport",
-    )
-    hub._nc = cast(Any, fake_nc)
+async def test_peer_sync_setup_failure_can_retry(monkeypatch):
+    from kinopio_hub._broker import start_managed_broker
 
+    broker = await start_managed_broker(host="127.0.0.1")
     try:
-        await hub._close_connection_only()
+        async with KinopioHub(mesh=False, discovery=False, servers=[broker.url], peer_timeout=0.02) as hub:
+            await hub.connected()
+            candidate = hub.connection.active
+            async with async_timeout(2):
+                while candidate["syncing"]:
+                    await asyncio.sleep(0.005)
+            original_publish = hub.connection._publish
+            subscriptions = len(candidate["subscriptions"])
 
-        assert fake_nc.drain_calls == 0
-        assert fake_nc.close_calls == 1
+            async def fail_publish(*args, **kwargs):
+                raise RuntimeError("sync setup failure")
+
+            monkeypatch.setattr(hub.connection, "_publish", fail_publish)
+            with pytest.raises(RuntimeError, match="sync setup"):
+                await hub.connection._peer_sync(candidate)
+            assert not candidate["syncing"]
+            assert len(candidate["subscriptions"]) == subscriptions
+            monkeypatch.setattr(hub.connection, "_publish", original_publish)
+            await hub.connection._peer_sync(candidate)
+            assert candidate["syncing"]
+            async with async_timeout(2):
+                while candidate["syncing"]:
+                    await asyncio.sleep(0.005)
+            assert len(candidate["subscriptions"]) == subscriptions
     finally:
-        await hub.aclose()
-
-
-@pytest.mark.asyncio
-async def test_open_connection_closes_client_when_connect_fails() -> None:
-    hub = KinopioHub(
-        servers=["wss://server-a:443"],
-        wait_on_first_connect=False,
-        auto_retry=False,
-        health_report=0,
-    )
-    fake_nc = FakeNATSConnection(
-        "wss://server-a:443",
-        transport_name="WebSocketTransport",
-        connect_error=TimeoutError(),
-    )
-
-    try:
-        with patch("kinopio_hub._hub.NATSClient", return_value=fake_nc):
-            with pytest.raises(TimeoutError):
-                await hub._open_connection(("wss://server-a:443",))
-
-        assert fake_nc.connect_calls == 1
-        assert fake_nc.close_calls == 1
-    finally:
-        await hub.aclose()
-
-
-@pytest.mark.asyncio
-async def test_open_connection_closes_client_when_connect_is_cancelled() -> None:
-    hub = KinopioHub(
-        servers=["wss://server-a:443"],
-        wait_on_first_connect=False,
-        auto_retry=False,
-        health_report=0,
-    )
-    fake_nc = FakeNATSConnection(
-        "wss://server-a:443",
-        transport_name="WebSocketTransport",
-        connect_error=asyncio.CancelledError(),
-    )
-
-    try:
-        with patch("kinopio_hub._hub.NATSClient", return_value=fake_nc):
-            with pytest.raises(asyncio.CancelledError):
-                await hub._open_connection(("wss://server-a:443",))
-
-        assert fake_nc.connect_calls == 1
-        assert fake_nc.close_calls == 1
-    finally:
-        await hub.aclose()
-
-
-@pytest.mark.asyncio
-async def test_probe_server_closes_client_when_connect_fails_before_connected() -> None:
-    hub = KinopioHub(
-        servers=["wss://server-a:443"],
-        wait_on_first_connect=False,
-        auto_retry=False,
-        health_report=0,
-    )
-    fake_nc = FakeNATSConnection(
-        "wss://server-a:443",
-        transport_name="WebSocketTransport",
-        connect_error=TimeoutError(),
-    )
-    fake_nc.is_connected = False
-
-    try:
-        with patch("kinopio_hub._hub.NATSClient", return_value=fake_nc):
-            result = await hub._probe_server("wss://server-a:443", 0)
-
-        assert result.available is False
-        assert fake_nc.connect_calls == 1
-        assert fake_nc.close_calls == 1
-    finally:
-        await hub.aclose()
-
-
-@pytest.mark.asyncio
-async def test_force_close_client_closes_half_open_websocket_transport() -> None:
-    hub = KinopioHub(wait_on_first_connect=False)
-    fake_nc = FakeNATSConnection("wss://server-a:443", transport_name="WebSocketTransport")
-    client_session = FakeClientSession()
-    close_task = asyncio.get_running_loop().create_future()
-    transport = fake_nc._transport
-    assert transport is not None
-    transport._ws = None
-    transport._client = client_session
-    transport._close_task = close_task
-
-    try:
-        await hub._force_close_client(cast(Any, fake_nc), message="ignored")
-
-        assert client_session.close_calls == 1
-        assert close_task.done()
-        assert fake_nc.close_calls == 0
-    finally:
-        await hub.aclose()
-
-
-@pytest.mark.asyncio
-async def test_open_connection_for_candidates_recovers_websocket_order_after_failure() -> None:
-    hub = KinopioHub(
-        servers=["wss://server-a:443", "wss://server-b:443", "wss://server-c:443"],
-        wait_on_first_connect=False,
-        auto_retry=False,
-        health_report=0,
-    )
-    first_success = FakeNATSConnection("wss://server-b:443", transport_name="WebSocketTransport")
-    final_success = FakeNATSConnection("wss://server-b:443", transport_name="WebSocketTransport")
-
-    async def fake_open_connection(servers: Any) -> FakeNATSConnection:
-        key = tuple(servers)
-        if key == (
-            "wss://server-a:443",
-            "wss://server-b:443",
-            "wss://server-c:443",
-        ):
-            raise TimeoutError()
-        if key == ("wss://server-a:443",):
-            raise TimeoutError()
-        if key == ("wss://server-b:443",):
-            return first_success
-        if key == (
-            "wss://server-b:443",
-            "wss://server-c:443",
-            "wss://server-a:443",
-        ):
-            return final_success
-        raise AssertionError(f"unexpected server tuple: {key}")
-
-    try:
-        with patch.object(hub, "_open_connection", side_effect=fake_open_connection):
-            nc, recovered_candidates = await hub._open_connection_for_candidates(
-                ("wss://server-a:443", "wss://server-b:443", "wss://server-c:443")
-            )
-
-        assert nc is final_success
-        assert recovered_candidates == (
-            "wss://server-b:443",
-            "wss://server-c:443",
-            "wss://server-a:443",
-        )
-        assert first_success.close_calls == 1
-    finally:
-        await hub.aclose()
-
-
-@pytest.mark.asyncio
-async def test_open_connection_for_candidates_recovers_websocket_order_after_timeout() -> None:
-    hub = KinopioHub(
-        servers=["wss://server-a:443", "wss://server-b:443", "wss://server-c:443"],
-        wait_on_first_connect=False,
-        auto_retry=False,
-        health_report=0,
-    )
-    first_success = FakeNATSConnection("wss://server-b:443", transport_name="WebSocketTransport")
-    final_success = FakeNATSConnection("wss://server-b:443", transport_name="WebSocketTransport")
-
-    async def fake_open_connection(servers: Any) -> FakeNATSConnection:
-        key = tuple(servers)
-        if key == (
-            "wss://server-a:443",
-            "wss://server-b:443",
-            "wss://server-c:443",
-        ):
-            await asyncio.sleep(0.05)
-            raise AssertionError("initial websocket open should have timed out first")
-        if key == ("wss://server-a:443",):
-            raise TimeoutError()
-        if key == ("wss://server-b:443",):
-            return first_success
-        if key == (
-            "wss://server-b:443",
-            "wss://server-c:443",
-            "wss://server-a:443",
-        ):
-            return final_success
-        raise AssertionError(f"unexpected server tuple: {key}")
-
-    try:
-        with (
-            patch.object(hub, "_open_connection", side_effect=fake_open_connection),
-            patch.object(
-                hub,
-                "_websocket_multi_server_attempt_timeout",
-                return_value=0.01,
-            ),
-        ):
-            nc, recovered_candidates = await hub._open_connection_for_candidates(
-                ("wss://server-a:443", "wss://server-b:443", "wss://server-c:443")
-            )
-
-        assert nc is final_success
-        assert recovered_candidates == (
-            "wss://server-b:443",
-            "wss://server-c:443",
-            "wss://server-a:443",
-        )
-        assert first_success.close_calls == 1
-    finally:
-        await hub.aclose()
-
-
-@pytest.mark.asyncio
-@pytest.mark.integration
-async def test_latency_mode_real_probe_handles_partial_failure_and_connects(
-    nats_server: Any,
-) -> None:
-    dead_url = unused_nats_url()
-    hub = KinopioHub(
-        servers=[dead_url, nats_server.tcp_url],
-        server_selection_mode="latency",
-        reconnect_timeout=0.2,
-        wait_on_first_connect=False,
-        auto_retry=False,
-        health_report=0,
-    )
-
-    try:
-        await asyncio.wait_for(hub.wait_connected(), timeout=5)
-
-        assert hub.is_connected
-        assert hub._connection_plan.candidate_servers[0] == nats_server.tcp_url
-        assert hub._connection_plan.active_server == nats_server.tcp_url
-
-        probe_results = {result.server: result for result in hub._connection_plan.probe_results}
-        assert probe_results[nats_server.tcp_url].available is True
-        assert probe_results[nats_server.tcp_url].round_trip_ms is not None
-        assert probe_results[dead_url].available is False
-        assert probe_results[dead_url].round_trip_ms is None
-        assert probe_results[dead_url].error is not None
-    finally:
-        await asyncio.wait_for(hub.aclose(), timeout=5)
-
-
-@pytest.mark.asyncio
-@pytest.mark.integration
-async def test_ordered_mode_connects_against_independent_server_pool(
-    nats_server_pool: Any,
-) -> None:
-    server_a, server_b = nats_server_pool.urls
-    hub = KinopioHub(
-        servers=[server_a, server_b],
-        server_selection_mode="ordered",
-        wait_on_first_connect=False,
-        health_report=0,
-    )
-
-    try:
-        await asyncio.wait_for(hub.wait_connected(), timeout=5)
-        await wait_for_active_server(hub, server_a)
-        assert hub._connection_plan.candidate_servers == (server_a, server_b)
-        assert hub._connection_plan.active_server == server_a
-    finally:
-        await asyncio.wait_for(hub.aclose(), timeout=5)
-
-
-@pytest.mark.asyncio
-@pytest.mark.integration
-@pytest.mark.slow
-async def test_latency_mode_background_hot_switch_preserves_pubsub_and_request(
-    nats_cluster: Any,
-) -> None:
-    server_a, server_b = nats_cluster.urls
-    allow_switch = asyncio.Event()
-
-    initial_results = (
-        probe_result(server_a, 0, 10.0),
-        probe_result(server_b, 1, 75.0),
-    )
-    switched_results = (
-        probe_result(server_a, 0, 80.0),
-        probe_result(server_b, 1, 10.0),
-    )
-
-    async def fake_probe(_: Any) -> tuple[_ServerProbeResult, ...]:
-        if allow_switch.is_set():
-            return switched_results
-        return initial_results
-
-    hub = KinopioHub(
-        servers=[server_a, server_b],
-        server_selection_mode="latency",
-        wait_on_first_connect=False,
-        health_report=0,
-    )
-    hub._latency_probe_interval_seconds = 0.05
-
-    inbound_messages: list[Any] = []
-    outbound_messages: list[Any] = []
-
-    try:
-        with patch.object(hub, "_probe_candidate_servers", side_effect=fake_probe):
-            async with (
-                KinopioHub(servers=[server_b]) as publisher,
-                KinopioHub(servers=[server_b]) as subscriber,
-                KinopioHub(servers=[server_b]) as responder,
-            ):
-                await hub.wait_connected()
-                await wait_for_active_server(hub, server_a)
-
-                async def inbound_callback(data: Any, _: Any) -> None:
-                    inbound_messages.append(data)
-
-                async def outbound_callback(data: Any, _: Any) -> None:
-                    outbound_messages.append(data)
-
-                async def responder_handler(data: Any, _: Any) -> Any:
-                    return {"echo": data["message"]}
-
-                await hub.chat.messages.subscribe(inbound_callback)
-                await subscriber.audit.events.subscribe(outbound_callback)
-                await responder.echo.service.serve(responder_handler)
-
-                allow_switch.set()
-                await wait_for_active_server(hub, server_b)
-
-                await publisher.chat.messages.publish({"message": "after-switch"})
-                await wait_for(lambda: inbound_messages == [{"message": "after-switch"}])
-
-                await hub.audit.events.publish({"source": "hot-switch"})
-                await wait_for(lambda: outbound_messages == [{"source": "hot-switch"}])
-
-                response = await hub.echo.service.request({"message": "ok"})
-                assert response == {"echo": "ok"}
-    finally:
-        await hub.aclose()
-
-
-@pytest.mark.asyncio
-@pytest.mark.integration
-@pytest.mark.slow
-async def test_latency_mode_background_hot_switch_preserves_service_and_value_tracking(
-    nats_cluster: Any,
-) -> None:
-    server_a, server_b = nats_cluster.urls
-    allow_switch = asyncio.Event()
-
-    initial_results = (
-        probe_result(server_a, 0, 12.0),
-        probe_result(server_b, 1, 70.0),
-    )
-    switched_results = (
-        probe_result(server_a, 0, 90.0),
-        probe_result(server_b, 1, 15.0),
-    )
-
-    async def fake_probe(_: Any) -> tuple[_ServerProbeResult, ...]:
-        if allow_switch.is_set():
-            return switched_results
-        return initial_results
-
-    hub = KinopioHub(
-        servers=[server_a, server_b],
-        server_selection_mode="latency",
-        wait_on_first_connect=False,
-        health_report=0,
-    )
-    hub._latency_probe_interval_seconds = 0.05
-
-    try:
-        with patch.object(hub, "_probe_candidate_servers", side_effect=fake_probe):
-            async with (
-                KinopioHub(servers=[server_b]) as publisher,
-                KinopioHub(servers=[server_b]) as requester,
-            ):
-                tracked_variable = hub.sensors.temperature
-
-                async def adder(data: Any, _: Any) -> Any:
-                    return {"sum": data["a"] + data["b"]}
-
-                await hub.math.service.serve(adder)
-                await hub.wait_connected()
-                await wait_for_active_server(hub, server_a)
-                await wait_for(
-                    lambda: tracked_variable._tracker_handle is not None
-                    and tracked_variable._tracker_handle.active,
-                )
-
-                await publisher.sensors.temperature.publish({"reading": 1})
-                await wait_for(lambda: tracked_variable.value == {"reading": 1})
-
-                allow_switch.set()
-                await wait_for_active_server(hub, server_b)
-
-                nats_cluster.server_a.stop()
-                await asyncio.sleep(0.2)
-
-                await publisher.sensors.temperature.publish({"reading": 2})
-                await wait_for(lambda: tracked_variable.value == {"reading": 2})
-
-                response = await requester.math.service.request({"a": 2, "b": 3})
-                assert response == {"sum": 5}
-    finally:
-        await hub.aclose()
-
-
-@pytest.mark.asyncio
-@pytest.mark.integration
-async def test_publish_updates_cached_value(nats_server: Any) -> None:
-    async with KinopioHub(servers=[nats_server.tcp_url]) as hub:
-        variable = hub.chat.messages
-        payload = {"message": "hello", "count": 1}
-
-        await variable.publish(payload)
-
-        assert variable.value == payload
-
-
-@pytest.mark.asyncio
-@pytest.mark.integration
-async def test_subscribe_receives_messages(nats_server: Any) -> None:
-    received: list[dict[str, Any]] = []
-    event = asyncio.Event()
-
-    async with KinopioHub(servers=[nats_server.tcp_url]) as subscriber, KinopioHub(
-        servers=[nats_server.tcp_url]
-    ) as publisher:
-        async def callback(data: Any, _: Any) -> None:
-            received.append(data)
-            event.set()
-
-        await subscriber.chat.messages.subscribe(callback)
-        await publisher.chat.messages.publish({"user": "alice", "message": "hi"})
-
-        await asyncio.wait_for(event.wait(), timeout=5)
-
-    assert received == [{"user": "alice", "message": "hi"}]
-
-
-@pytest.mark.asyncio
-@pytest.mark.integration
-async def test_queue_subscriptions_distribute_work(nats_server: Any) -> None:
-    results_a: list[int] = []
-    results_b: list[int] = []
-
-    async with KinopioHub(servers=[nats_server.tcp_url]) as hub_a, KinopioHub(
-        servers=[nats_server.tcp_url]
-    ) as hub_b, KinopioHub(servers=[nats_server.tcp_url]) as publisher:
-        async def callback_a(data: Any, _: Any) -> None:
-            results_a.append(int(data["job"]))
-
-        async def callback_b(data: Any, _: Any) -> None:
-            results_b.append(int(data["job"]))
-
-        await hub_a.jobs.worker.subscribe(callback_a, queue="workers")
-        await hub_b.jobs.worker.subscribe(callback_b, queue="workers")
-
-        for index in range(8):
-            await publisher.jobs.worker.publish({"job": index})
-
-        await wait_for(lambda: len(results_a) + len(results_b) == 8)
-
-    assert len(results_a) > 0
-    assert len(results_b) > 0
-    assert sorted(results_a + results_b) == list(range(8))
-
-
-@pytest.mark.asyncio
-@pytest.mark.integration
-async def test_request_reply(nats_server: Any) -> None:
-    async with KinopioHub(servers=[nats_server.tcp_url]) as server, KinopioHub(
-        servers=[nats_server.tcp_url]
-    ) as client:
-        async def handler(data: Any, _: Any) -> Any:
-            return {"result": data["a"] + data["b"]}
-
-        await server.math.calculator.serve(handler)
-        response = await client.math.calculator.request({"a": 3, "b": 9})
-
-    assert response == {"result": 12}
-
-
-@pytest.mark.asyncio
-@pytest.mark.integration
-async def test_service_exception_returns_error_payload(nats_server: Any) -> None:
-    async with KinopioHub(servers=[nats_server.tcp_url]) as server, KinopioHub(
-        servers=[nats_server.tcp_url]
-    ) as client:
-        async def handler(_: Any, __: Any) -> Any:
-            raise ValueError("boom")
-
-        await server.math.calculator.serve(handler)
-        response = await client.math.calculator.request({"a": 3, "b": 9})
-
-    assert response == {"error": True, "message": "boom"}
-
-
-@pytest.mark.asyncio
-@pytest.mark.integration
-async def test_duplicate_publish_is_suppressed(nats_server: Any) -> None:
-    received: list[Any] = []
-
-    async with KinopioHub(servers=[nats_server.tcp_url]) as subscriber, KinopioHub(
-        servers=[nats_server.tcp_url]
-    ) as publisher:
-        async def callback(data: Any, _: Any) -> None:
-            received.append(data)
-
-        await subscriber.chat.messages.subscribe(callback)
-        await publisher.chat.messages.publish({"message": "same"})
-        await publisher.chat.messages.publish({"message": "same"})
-
-        await wait_for(lambda: len(received) == 1)
-        await asyncio.sleep(0.3)
-
-    assert received == [{"message": "same"}]
-
-
-@pytest.mark.asyncio
-@pytest.mark.integration
-async def test_dynamic_attribute_access_reuses_instances(nats_server: Any) -> None:
-    async with KinopioHub(servers=[nats_server.tcp_url]) as hub:
-        from_scope = hub.get_scope("chat").get_variable("messages")
-        from_attr = hub.chat.messages
-
-        assert from_scope is from_attr
-        assert from_attr.subject == "chat.messages"
-
-
-@dataclass
-class WrappedJSONCodec:
-    def encode(self, data: Any) -> bytes:
-        return b"wrapped:" + json.dumps(data).encode("utf-8")
-
-    def decode(self, payload: bytes) -> Any:
-        return json.loads(payload.removeprefix(b"wrapped:").decode("utf-8"))
-
-
-@pytest.mark.asyncio
-@pytest.mark.integration
-async def test_custom_codec_is_used(nats_server: Any) -> None:
-    received: list[Any] = []
-    event = asyncio.Event()
-    payload = {"message": "hello", "count": 1}
-
-    async with (
-        KinopioHub(servers=[nats_server.tcp_url], codec=WrappedJSONCodec()) as subscriber,
-        KinopioHub(servers=[nats_server.tcp_url], codec=WrappedJSONCodec()) as publisher,
-    ):
-        async def callback(data: Any, _: Any) -> None:
-            received.append(data)
-            event.set()
-
-        await subscriber.chat.messages.subscribe(callback)
-        await publisher.chat.messages.publish(payload)
-
-        await asyncio.wait_for(event.wait(), timeout=5)
-
-    assert received == [payload]
-
-
-@pytest.mark.asyncio
-@pytest.mark.integration
-async def test_manual_reconnect_restores_service(nats_server: Any) -> None:
-    async with KinopioHub(servers=[nats_server.tcp_url]) as server, KinopioHub(
-        servers=[nats_server.tcp_url]
-    ) as client:
-        async def handler(data: Any, _: Any) -> Any:
-            return {"result": data["a"] + data["b"]}
-
-        await server.math.calculator.serve(handler)
-        await server.reconnect()
-        response = await client.math.calculator.request({"a": 1, "b": 2})
-
-    assert response == {"result": 3}
-
-
-@pytest.mark.asyncio
-@pytest.mark.integration
-async def test_auto_reconnect_updates_state_and_recovers(nats_server: Any) -> None:
-    transitions: list[ConnectionState] = []
-    hub = KinopioHub(
-        servers=[nats_server.tcp_url],
-        reconnect_time_wait=0.2,
-        retry_delay=0.1,
-        max_retry_delay=0.5,
-    )
-    hub.on_state_change(transitions.append)
-
-    try:
-        await hub.wait_connected()
-        nats_server.stop()
-        await wait_for(lambda: ConnectionState.DISCONNECTED in transitions, timeout=10)
-
-        nats_server.start()
-        await wait_for(lambda: hub.is_connected, timeout=15)
-    finally:
-        await hub.aclose()
-
-    assert ConnectionState.CONNECTED in transitions
-    assert ConnectionState.DISCONNECTED in transitions
-
-
-@pytest.mark.asyncio
-@pytest.mark.integration
-async def test_aclose_is_idempotent(nats_server: Any) -> None:
-    hub = KinopioHub(servers=[nats_server.tcp_url])
-    await hub.wait_connected()
-
-    await hub.aclose()
-    await hub.aclose()
-
-    assert hub.state == ConnectionState.DISCONNECTED
-
-
-@pytest.mark.asyncio
-@pytest.mark.integration
-async def test_websocket_connection_and_pubsub(nats_server: Any) -> None:
-    received: list[Any] = []
-    event = asyncio.Event()
-
-    async with KinopioHub(servers=[nats_server.ws_url]) as subscriber, KinopioHub(
-        servers=[nats_server.tcp_url]
-    ) as publisher:
-        async def callback(data: Any, _: Any) -> None:
-            received.append(data)
-            event.set()
-
-        await subscriber.chat.messages.subscribe(callback)
-        await publisher.chat.messages.publish({"message": "ws works"})
-
-        await asyncio.wait_for(event.wait(), timeout=5)
-
-    assert received == [{"message": "ws works"}]
+        await broker.close()
+
+
+async def test_variable_notifications_follow_pending_and_connection_changes():
+    async with KinopioHub(mesh=False, servers=[], discovery=False, peer_timeout=0.01) as hub:
+        one = hub.scope("s").var("one")
+        two = hub.scope("s").var("two")
+        await one.ready()
+        first, second = [], []
+        one.watch(lambda value, meta: first.append((value, meta)))
+        two.watch(lambda value, meta: second.append((value, meta)))
+        await one.set(1)
+        sent = p.copy(hub.store.records[one.key])
+        await one.set(2)
+        hub.store._acknowledge([sent])
+        assert one.meta["pending"] and len(first) == 3
+        hub.store._acknowledge([hub.store.records[one.key]])
+        assert not one.meta["pending"] and len(first) == 4
+        assert len(second) == 1
+        hub._set_state("connected")
+        assert first[-1][1]["connected"] and second[-1][1]["connected"]
+        hub._set_state("offline")
+        assert not first[-1][1]["connected"] and not second[-1][1]["connected"]
+    assert one.value is UNSET and one.meta["initialized"]
+    assert first[-1][1]["version"] is None
+
+
+async def test_close_keeps_initialized_metadata_without_initializing_unknown_refs():
+    hub = KinopioHub(mesh=False, servers=[], discovery=False, peer_timeout=30)
+    known = hub.scope("s").var("known")
+    unknown = hub.scope("s").var("unknown")
+    await known.set(1)
+    await hub.close()
+    assert known.meta["initialized"]
+    assert not unknown.meta["initialized"]
+
+
+async def test_watch_after_write_does_not_repeat_unchanged_initial_value():
+    async with KinopioHub(mesh=False, servers=[], discovery=False) as hub:
+        ref = hub.scope("s").var("v")
+        await ref.set(1)
+        values = []
+        ref.watch(lambda value, meta: values.append(value))
+        ref.watch(lambda value, meta: values.append(value))
+        hub.store.emit()
+        assert values == [1, 1]
+        await ref.set(2)
+        assert values == [1, 1, 2, 2]

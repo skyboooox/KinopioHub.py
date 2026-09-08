@@ -1,11 +1,9 @@
 .venv/
 .mypy_cache/
-.pytest-nats/
-.pytest-nats-tools/
 .pytest_cache/
 .ruff_cache/
 __pycache__/
 .DS_Store
-AGENTS.md
-dist
-plans
+dist/
+*.egg-info/
+build/

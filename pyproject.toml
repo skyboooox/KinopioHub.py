@@ -1,88 +1,26 @@
 [build-system]
-requires = ["hatchling>=1.27.0"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
-
 [project]
 name = "kinopio-hub"
-version = "0.1.1"
-description = "High-performance communication middleware for scoped NATS messaging."
+version = "3.0.0"
 readme = "README.md"
-requires-python = ">=3.10"
 license = "GPL-3.0-or-later"
-authors = [
-  { name = "skyboooox" },
-]
-keywords = ["messaging", "nats", "pubsub", "request-reply", "scope"]
-classifiers = [
-  "Development Status :: 4 - Beta",
-  "Intended Audience :: Developers",
-  "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
-  "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.10",
-  "Programming Language :: Python :: 3.11",
-  "Programming Language :: Python :: 3.12",
-  "Programming Language :: Python :: 3.13",
-  "Topic :: Software Development :: Libraries",
-  "Topic :: System :: Networking",
-]
-dependencies = [
-  "aiohttp>=3.10",
-  "cryptography>=42.0.0",
-  "nats-py>=2.14.0",
-  "zeroconf>=0.136.0",
-]
-
-[project.scripts]
-kinopio-hub = "kinopio_hub._cli:main"
-
+authors = [{name = "skyboooox"}]
+description = "In-memory cloud variables over NATS Core"
+requires-python = ">=3.10"
+dependencies = ["nats-py==2.15.0", "aiohttp==3.14.3", "psutil==7.2.2", "rfc8785==0.1.4", "async-timeout==5.0.1; python_version < '3.11'"]
 [project.optional-dependencies]
-dev = [
-  "mypy>=1.18.0",
-  "pytest>=8.3.0",
-  "pytest-asyncio>=1.2.0",
-  "ruff>=0.13.0",
-]
-
-[project.urls]
-Homepage = "https://github.com/skyboooox/KinopioHub.py"
-Documentation = "https://github.com/skyboooox/KinopioHub.py"
-Repository = "https://github.com/skyboooox/KinopioHub.py"
-Issues = "https://github.com/skyboooox/KinopioHub.py/issues"
+dev = ["pytest>=8", "pytest-asyncio>=1", "ruff>=0.12", "mypy>=1.15", "build>=1.2", "types-psutil"]
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+[tool.mypy]
+files = ["src"]
+check_untyped_defs = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/kinopio_hub"]
-
 [tool.hatch.build.targets.sdist]
-include = [
-  "/src/kinopio_hub",
-  "/examples",
-  "/README_CN.md",
-  "/How_To_Dev.md",
-]
-
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-testpaths = ["tests"]
-markers = [
-  "integration: exercises real NATS processes or network coordination flows",
-  "slow: slower integration coverage such as local leaf runtime and auto-leaf election",
-]
-
-[tool.ruff]
-line-length = 100
-target-version = "py310"
-src = ["src", "tests", "examples"]
-
-[tool.ruff.lint]
-select = ["B", "E", "F", "I", "W"]
-
-[tool.mypy]
-python_version = "3.10"
-files = ["src", "tests"]
-check_untyped_defs = true
-disallow_incomplete_defs = true
-disallow_untyped_defs = true
-warn_unused_ignores = true
-warn_redundant_casts = true
-warn_return_any = true
-ignore_missing_imports = true
+include = ["src/kinopio_hub", "tests", "examples", "README.md", "README_CN.md", "LICENSE", "pyproject.toml", "uv.lock"]
