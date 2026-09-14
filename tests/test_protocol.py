@@ -44,21 +44,46 @@ def test_bad_clock(counter):
 
 def test_record_and_decode():
     assert p.compare({"counter": "10", "writer": "a"}, {"counter": "9", "writer": "z"}) == 1
-    assert p.record_of({"scope": "s", "name": "v", "version": {"counter": "1", "writer": "w"}, "deleted": True})["deleted"]
+    assert p.record_of({"name": "v", "version": {"counter": "1", "writer": "w"}, "deleted": True})["deleted"]
     for value in [b'NaN', b'Infinity', b'\xff', b'{', b'x' * (1024 * 1024 + 1)]:
         with pytest.raises(KinopioError):
             p.decode(value)
-    assert p.prefix("中文") == "kh.v3.e4b8ade69687"
+    assert p.prefix("中文") == "_sys.v4.e4b8ade69687"
 
 
 @pytest.mark.parametrize("field", "uptimeMs pendingVariables pendingBytes variables subscriptions reconnects sentMessages receivedMessages sentBytes receivedBytes".split())
 def test_status_counters_reject_null(field):
     with pytest.raises(KinopioError) as error:
-        p.status_of({"instanceId": "sdk", field: None}, "sdk")
+        p.status_of({"instanceId": "sdk", "namespace": "test", field: None}, "sdk", "test")
     assert error.value.code == "INVALID_REPORT"
 
 
 def test_status_optional_counters_and_nullable_rtt():
-    assert p.status_of({"instanceId": "sdk"}, "sdk") == {"instanceId": "sdk"}
-    status = {"instanceId": "sdk", "pendingBytes": 0, "rttMs": None}
-    assert p.status_of(status, "sdk") == status
+    assert p.status_of({"instanceId": "sdk", "namespace": "test"}, "sdk", "test") == {"instanceId": "sdk", "namespace": "test"}
+    status = {"instanceId": "sdk", "namespace": "test", "pendingBytes": 0, "rttMs": None}
+    assert p.status_of(status, "sdk", "test") == status
+
+
+@pytest.mark.parametrize("value", ["", "x" * 129, "\x00", "\x1f", "\x7f", "\ud800", None, 1])
+def test_invalid_names(value):
+    with pytest.raises(KinopioError) as error:
+        p.token(value)
+    assert error.value.code == "INVALID_NAME"
+
+
+def test_names_are_literal_utf8_without_normalization():
+    for value in [" ", ".", "*", ">", "中文", "😀" * 32, "é", "e\u0301", "\u0080", "\u0800"]:
+        assert p.token(value) == value.encode("utf-8").hex()
+        assert p.key(" namespace ", value) == "206e616d65737061636520." + value.encode().hex()
+    assert p.token("é") != p.token("e\u0301")
+    assert p.token("A") != p.token("a")
+    assert p.PROTOCOL == 4
+    with pytest.raises(KinopioError, match="record"):
+        p.record_of({"scope": "old", "name": "v", "version": {"counter": "1", "writer": "w"}, "deleted": True})
+
+
+@pytest.mark.parametrize("fields", [{}, {"namespace": "other"}, {"namespace": "test", "name": "legacy"}])
+def test_status_requires_matching_namespace_and_no_legacy_name(fields):
+    with pytest.raises(KinopioError) as error:
+        p.status_of({"instanceId": "sdk", **fields}, "sdk", "test")
+    assert error.value.code == "INVALID_REPORT"

@@ -4,8 +4,8 @@ from _options import options
 
 
 async def main() -> None:
-    async with KinopioHub(**options("basic")) as hub:
-        battery = hub.scope("devices").var("battery")
+    async with KinopioHub(**options()) as hub:
+        battery = hub.var("battery")
         await battery.set(80)
         await hub.flush()
         print("Current value:", battery.value)

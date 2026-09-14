@@ -2,8 +2,8 @@ import os
 from typing import Any
 
 
-def options(name: str) -> dict[str, Any]:
-    result: dict[str, Any] = {"name": f"example-{name}"}
+def options() -> dict[str, Any]:
+    result: dict[str, Any] = {"namespace": "demo"}
     if endpoints := os.getenv("KINOPIO_EXAMPLE_SERVERS"):
         result["servers"] = [url.strip() for url in endpoints.split(",") if url.strip()]
     if endpoints := os.getenv("KINOPIO_LEAF_SERVERS"):

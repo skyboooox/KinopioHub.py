@@ -11,8 +11,8 @@ from kinopio_hub import _protocol as p
 
 async def test_ram_snapshots_and_independent_watchers():
     async with KinopioHub(mesh=False, servers=[], peer_timeout=0.01) as hub:
-        ref = hub.scope("room").var("temperature")
-        assert hub.scope("room").var("temperature") is ref
+        ref = hub.var("room/temperature")
+        assert hub.var("room/temperature") is ref
         assert ref.value is UNSET
         values = []
 
@@ -41,7 +41,7 @@ async def test_ram_snapshots_and_independent_watchers():
 
 async def test_discovery_empty_and_close_waiters():
     hub = KinopioHub(mesh=False, servers=[], peer_timeout=0.01)
-    ref = hub.scope("s").var("v")
+    ref = hub.var("s/v")
     await ref.ready()
     assert ref.meta["initialized"] and ref.meta["exists"] is False
     task = asyncio.create_task(hub.connected(timeout=2))
@@ -54,10 +54,10 @@ async def test_discovery_empty_and_close_waiters():
 
 async def test_capacity_collision_and_clock_rollback():
     async with KinopioHub(mesh=False, servers=[], max_variables=1) as hub:
-        ref = hub.scope("s").var("v")
+        ref = hub.var("s/v")
         await ref.set(1)
         with pytest.raises(KinopioError):
-            hub.scope("s").var("another")
+            hub.var("s/another")
         original = p.copy(hub.store.records[ref.key])
         bad = {**original, "value": 2}
         with pytest.raises(KinopioError) as error:
@@ -73,7 +73,7 @@ async def test_capacity_collision_and_clock_rollback():
 async def test_callbacks_cannot_reject_write():
     errors: list[Exception] = []
     async with KinopioHub(mesh=False, servers=[], on_callback_error=errors.append) as hub:
-        ref = hub.scope("s").var("v")
+        ref = hub.var("s/v")
 
         def bad(value, meta):
             raise RuntimeError("observer")
@@ -101,16 +101,16 @@ async def test_real_broker_replication_and_peer_snapshot(websocket):
 
     broker = await start_managed_broker(host="127.0.0.1")
     url = broker.websocket_url if websocket else broker.url
-    one = KinopioHub(mesh=False, servers=[url], peer_timeout=0.1, health_interval=0.1)
+    one = KinopioHub("replication", mesh=False, servers=[url], peer_timeout=0.1, health_interval=0.1)
     two = None
     try:
-        ref = one.scope("s").var("v")
+        ref = one.var("s/v")
         await ref.set({"hello": "世界", "null": None})
         await one.connected()
         await one.flush()
         assert not ref.meta["pending"]
-        two = KinopioHub(mesh=False, servers=[url], peer_timeout=0.1, health_interval=0.1)
-        other = two.scope("s").var("v")
+        two = KinopioHub("replication", mesh=False, servers=[url], peer_timeout=0.1, health_interval=0.1)
+        other = two.var("s/v")
         await two.connected()
         async with async_timeout(3):
             while other.value != ref.value:
@@ -137,7 +137,7 @@ async def test_offline_ram_reconnect_and_empty_restart():
     broker = await start_managed_broker(host="127.0.0.1")
     port = broker.port
     hub = KinopioHub(mesh=False, servers=[broker.url], probe_interval=0.05, timeout=0.2, peer_timeout=0.02)
-    ref = hub.scope("s").var("v")
+    ref = hub.var("s/v")
     replacement = None
     try:
         await hub.connected(timeout=3)
@@ -153,12 +153,12 @@ async def test_offline_ram_reconnect_and_empty_restart():
         await hub.connected(timeout=3)
         await hub.flush()
         assert ref.value == 2 and not ref.meta["pending"]
-        assert hub.scope("s").var("v") is ref
+        assert hub.var("s/v") is ref
         writer = hub.writer
         await hub.close()
-        async with KinopioHub(mesh=False, servers=[replacement.url], peer_timeout=0.03) as fresh:
-            await fresh.scope("s").var("v").ready()
-            assert fresh.scope("s").var("v").value is UNSET
+        async with KinopioHub(hub.namespace, mesh=False, servers=[replacement.url], peer_timeout=0.03) as fresh:
+            await fresh.var("s/v").ready()
+            assert fresh.var("s/v").value is UNSET
             assert fresh.writer != writer
     finally:
         await hub.close()
@@ -169,7 +169,7 @@ async def test_offline_ram_reconnect_and_empty_restart():
 
 async def test_offline_writes_schedule_bounded_work():
     async with KinopioHub(mesh=False, servers=[], discovery=False) as hub:
-        ref = hub.scope("s").var("v")
+        ref = hub.var("s/v")
         count = len(hub._tasks)
         for index in range(2000):
             await ref.set(index)
@@ -220,7 +220,7 @@ async def test_failed_handoff_keeps_previous_connection():
     try:
         async with KinopioHub(mesh=False, discovery=False, servers=[one.url]) as hub:
             await hub.connected()
-            ref = hub.scope("s").var("v")
+            ref = hub.var("s/v")
             await ref.set("retained")
             await hub.flush()
             old = hub.connection.active
@@ -283,8 +283,8 @@ async def test_peer_sync_setup_failure_can_retry(monkeypatch):
 
 async def test_variable_notifications_follow_pending_and_connection_changes():
     async with KinopioHub(mesh=False, servers=[], discovery=False, peer_timeout=0.01) as hub:
-        one = hub.scope("s").var("one")
-        two = hub.scope("s").var("two")
+        one = hub.var("s/one")
+        two = hub.var("s/two")
         await one.ready()
         first, second = [], []
         one.watch(lambda value, meta: first.append((value, meta)))
@@ -307,8 +307,8 @@ async def test_variable_notifications_follow_pending_and_connection_changes():
 
 async def test_close_keeps_initialized_metadata_without_initializing_unknown_refs():
     hub = KinopioHub(mesh=False, servers=[], discovery=False, peer_timeout=30)
-    known = hub.scope("s").var("known")
-    unknown = hub.scope("s").var("unknown")
+    known = hub.var("s/known")
+    unknown = hub.var("s/unknown")
     await known.set(1)
     await hub.close()
     assert known.meta["initialized"]
@@ -317,7 +317,7 @@ async def test_close_keeps_initialized_metadata_without_initializing_unknown_ref
 
 async def test_watch_after_write_does_not_repeat_unchanged_initial_value():
     async with KinopioHub(mesh=False, servers=[], discovery=False) as hub:
-        ref = hub.scope("s").var("v")
+        ref = hub.var("s/v")
         await ref.set(1)
         values = []
         ref.watch(lambda value, meta: values.append(value))
@@ -326,3 +326,67 @@ async def test_watch_after_write_does_not_repeat_unchanged_initial_value():
         assert values == [1, 1]
         await ref.set(2)
         assert values == [1, 1, 2, 2]
+
+
+async def test_namespace_identity_and_removed_api():
+    import uuid
+    async with KinopioHub(mesh=False, servers=[], discovery=False) as one, KinopioHub(mesh=False, servers=[], discovery=False) as two:
+        assert str(uuid.UUID(one.namespace, version=4)) == one.namespace
+        assert one.namespace != two.namespace
+        assert one.namespace not in (one.writer, one.instance_id)
+        assert one.status()["namespace"] == one.namespace
+        assert "name" not in one.status()
+        assert not hasattr(one, "scope")
+        with pytest.raises(AttributeError):
+            one.namespace = "changed"
+        one.options["namespace"] = "changed"
+        assert one.base == p.prefix(one.namespace)
+        assert one.namespace != "changed"
+    for invalid in ["", "\ud800", {}, "x" * 129]:
+        with pytest.raises(KinopioError):
+            KinopioHub(invalid)
+    with pytest.raises(KinopioError, match="no longer supported"):
+        KinopioHub(name="legacy")
+    with pytest.raises(TypeError):
+        KinopioHub("demo", [])
+
+
+async def test_wire_subject_binding_default_isolation_and_exact_sync_inbox():
+    from kinopio_hub._broker import start_managed_broker
+
+    broker = await start_managed_broker(host="127.0.0.1")
+    options = dict(mesh=False, discovery=False, servers=broker.url, peer_timeout=.02)
+    try:
+        async with KinopioHub(**options) as isolated, KinopioHub("literal.*", **options) as hub:
+            await asyncio.gather(isolated.connected(), hub.connected())
+            raw = hub.connection.active["connection"]
+            values = asyncio.Queue()
+            replies = asyncio.Queue()
+            subject = p.key(hub.namespace, "x.*>")
+            subscription = await raw.subscribe(subject, cb=values.put)
+            await hub.var("x.*>").set(1)
+            await hub.flush()
+            message = await asyncio.wait_for(values.get(), 1)
+            assert message.subject == subject
+            assert "scope" not in p.decode(message.data)
+            await isolated.var("x.*>").ready()
+            assert isolated.var("x.*>").value is UNSET
+            bad = {"name": "different", "version": {"counter": "99", "writer": "raw"}, "value": 2}
+            await raw.publish(subject, p.encode(bad))
+            await raw.flush()
+            async with async_timeout(1):
+                while hub.status()["currentError"] is None:
+                    await asyncio.sleep(.005)
+            assert hub.status()["currentError"]["code"] == "INVALID_RECORD"
+            assert hub.var("different").value is UNSET
+            assert hub.var("x.*>").value == 1
+            bad_reply = f"{hub.base}.inbox.extra.suffix"
+            reply_sub = await raw.subscribe(bad_reply, cb=replies.put)
+            await raw.publish(f"{hub.base}.sync", p.encode({"instanceId": "requester"}), reply=bad_reply)
+            await raw.flush()
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(replies.get(), .05)
+            await reply_sub.unsubscribe()
+            await subscription.unsubscribe()
+    finally:
+        await broker.close()

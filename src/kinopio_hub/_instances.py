@@ -24,7 +24,7 @@ class Instances:
         interval = report.get("interval") if isinstance(report, dict) else None
         if type(interval) is not int or not 1 <= interval <= 2147483647:
             raise p.KinopioError("INVALID_REPORT", "Invalid report interval")
-        status = p.status_of(report.get("status"), instance)
+        status = p.status_of(report.get("status"), instance, self.hub.namespace)
         if instance not in self.reports and len(self.reports) >= self.hub.options["max_instances"]:
             self.reports.pop(next(iter(self.reports)))
         self.reports[instance] = {
@@ -42,10 +42,14 @@ class Instances:
 
     async def _report(self) -> None:
         if self.hub.connection.active and not self.hub.closed:
+            status = self.hub.status()
+            status['messaging'] = {key: status['messaging'][key] for key in (
+                'phase', 'pendingRequests', 'pendingMessages', 'pendingBytes',
+                'inFlightHandlers', 'droppedMessages', 'nativeDroppedMessages')}
             await self.hub.connection._publish(
                 self.hub.connection.active,
                 f"{self.hub.base}.health.{self.hub.instance_id}",
-                {"status": self.hub.status(), "interval": round(self.hub.options["health_interval"] * 1000)},
+                {"status": status, "interval": round(self.hub.options["health_interval"] * 1000)},
             )
             self.hub._clear_error("report")
 

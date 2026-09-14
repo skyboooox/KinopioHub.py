@@ -9,8 +9,9 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from nats.aio.client import Client
+from ._message_transport import MessageClient
 
-from ._protocol import KinopioError
+from ._protocol import PROTOCOL, KinopioError
 
 
 def endpoint(url: str) -> str:
@@ -54,7 +55,7 @@ async def connect(url: str, options: dict[str, Any], **callbacks: Any) -> Client
         context = ssl.create_default_context()
     kwargs: dict[str, Any] = {
         "servers": [url], "allow_reconnect": False,
-        "connect_timeout": options.get("timeout", 3), "name": options.get("name", "KinopioHub"),
+        "connect_timeout": options.get("timeout", 3), "name": "KinopioHub Python",
         "token": options.get("token"), "user": options.get("user"),
         "password": options.get("password"), "tls": context,
         "tls_handshake_first": isinstance(tls, dict) and tls.get("handshake_first", False),
@@ -63,7 +64,7 @@ async def connect(url: str, options: dict[str, Any], **callbacks: Any) -> Client
         if options.get(field) is not None:
             kwargs[field] = options[field]
     kwargs.update(callbacks)
-    client = Client()
+    client = MessageClient()
     try:
         async with async_timeout(options.get("timeout", 3)):
             await client.connect(**kwargs)
@@ -85,7 +86,7 @@ async def discover(callback: Any, on_error: Any) -> asyncio.DatagramTransport:
                 return
             try:
                 value = decode(data)
-                if not isinstance(value, dict) or value.get("kind") != "kinopio-edge" or value.get("protocol") != 3:
+                if not isinstance(value, dict) or value.get("kind") != "kinopio-edge" or value.get("protocol") != PROTOCOL:
                     return
                 host = urlsplit(value["url"]).hostname or ""
                 if (host in ("localhost", "::1") or host.startswith("127.")) and not addr[0].startswith("127."):

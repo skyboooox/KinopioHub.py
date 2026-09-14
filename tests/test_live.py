@@ -12,8 +12,8 @@ from kinopio_hub._compat import timeout as async_timeout
 @pytest.fixture
 async def pair():
     broker = await start_managed_broker(host='127.0.0.1')
-    sender = KinopioHub(mesh=False, discovery=False, servers=broker.url, peer_timeout=.01)
-    receiver = KinopioHub(mesh=False, discovery=False, servers=broker.url, peer_timeout=.01)
+    sender = KinopioHub("live-tests", mesh=False, discovery=False, servers=broker.url, peer_timeout=.01)
+    receiver = KinopioHub("live-tests", mesh=False, discovery=False, servers=broker.url, peer_timeout=.01)
     try:
         await asyncio.gather(sender.connected(), receiver.connected())
         yield sender, receiver
@@ -91,7 +91,7 @@ async def test_live_receiver_rejects_expiry_sequence_session_and_clock_skew(pair
 async def test_live_reconnect_rebinds_and_never_replays():
     broker = await start_managed_broker(host='127.0.0.1')
     port = broker.port
-    hubs = [KinopioHub(mesh=False, discovery=False, servers=broker.url, probe_interval=.02, timeout=.1, peer_timeout=.01) for _ in range(2)]
+    hubs = [KinopioHub("live-tests", mesh=False, discovery=False, servers=broker.url, probe_interval=.02, timeout=.1, peer_timeout=.01) for _ in range(2)]
     replacement = None
     try:
         await asyncio.gather(*(hub.connected(3) for hub in hubs))

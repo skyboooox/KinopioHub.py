@@ -1,4 +1,4 @@
-"""Version 3 JSON wire protocol shared with the JavaScript SDK."""
+"""Version 4 JSON wire protocol shared with the JavaScript SDK."""
 from __future__ import annotations
 
 import copy as _copy
@@ -13,7 +13,7 @@ from typing import Any
 import rfc8785
 
 VERSION = "3.0.0"
-PROTOCOL = 3
+PROTOCOL = 4
 MAX_VALUE_BYTES = 64 * 1024
 
 
@@ -55,12 +55,12 @@ def token(value: str) -> str:
     return name(value).encode().hex()
 
 
-def key(scope: str, variable: str) -> str:
-    return f"{token(scope)}.{token(variable)}"
+def key(namespace: str, variable: str) -> str:
+    return f"{token(namespace)}.{token(variable)}"
 
 
 def prefix(namespace: str) -> str:
-    return f"kh.v3.{token(namespace)}"
+    return f"_sys.v4.{token(namespace)}"
 
 
 def copy(value: Any) -> Any:
@@ -150,9 +150,9 @@ def compare(a: Any, b: Any) -> int:
 
 
 def record_of(value: Any, max_bytes: int = MAX_VALUE_BYTES) -> dict[str, Any]:
-    if not isinstance(value, dict) or ("deleted" in value and type(value["deleted"]) is not bool):
+    if not isinstance(value, dict) or "scope" in value or ("deleted" in value and type(value["deleted"]) is not bool):
         fail("INVALID_RECORD", "Expected a variable record")
-    record = {"scope": name(value.get("scope"), "scope"), "name": name(value.get("name"), "variable"), "version": version_of(value.get("version")), "deleted": value.get("deleted") is True}
+    record = {"name": name(value.get("name"), "variable"), "version": version_of(value.get("version")), "deleted": value.get("deleted") is True}
     if not record["deleted"]:
         record["value"] = value_of(value.get("value", UNSET), max_bytes)
     return record
@@ -175,19 +175,19 @@ def safe_error(error: Any) -> dict[str, Any]:
     return {"code": getattr(error, "code", "SDK_ERROR"), "message": re.sub(r"(?:nats|tls|wss?)://[^\s]+", "[endpoint]", str(error))[:240], "at": int(time.time() * 1000)}
 
 
-def status_of(value: Any, instance_id: str) -> dict[str, Any]:
+def status_of(value: Any, instance_id: str, namespace: str) -> dict[str, Any]:
     try:
         value = value_of(value, 2048)
-        if not isinstance(value, dict) or value.get("instanceId") != instance_id or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", instance_id):
+        if not isinstance(value, dict) or value.get("instanceId") != instance_id or value.get("namespace") != namespace or "name" in value or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", instance_id):
             raise ValueError
-        allowed = "instanceId name sdk version runtime uptimeMs connection server rttMs lastSwitchReason pendingVariables pendingBytes variables subscriptions reconnects sentMessages receivedMessages sentBytes receivedBytes health currentError lastError mesh".split()
+        allowed = "instanceId namespace sdk version runtime uptimeMs connection server rttMs lastSwitchReason pendingVariables pendingBytes variables subscriptions reconnects sentMessages receivedMessages sentBytes receivedBytes health currentError lastError mesh messaging".split()
         result = {k: value[k] for k in allowed if k in value}
         for field in "uptimeMs pendingVariables pendingBytes variables subscriptions reconnects sentMessages receivedMessages sentBytes receivedBytes".split():
             if field in result and (type(result[field]) not in (int, float) or result[field] < 0):
                 raise ValueError
         if result.get("rttMs") is not None and (type(result["rttMs"]) not in (int, float) or result["rttMs"] < 0):
             raise ValueError
-        for field in "name sdk version runtime connection health".split():
+        for field in "namespace sdk version runtime connection health".split():
             if field in result and not isinstance(result[field], str):
                 raise ValueError
         for field in ("server", "lastSwitchReason"):
@@ -201,6 +201,17 @@ def status_of(value: Any, instance_id: str) -> dict[str, Any]:
             detail = result.get(field)
             if detail is not None and (not isinstance(detail, dict) or not isinstance(detail.get("code"), str) or not isinstance(detail.get("message"), str) or type(detail.get("at")) not in (int, float)):
                 raise ValueError
+        if "messaging" in result:
+            messaging = result['messaging']
+            if not isinstance(messaging, dict):
+                raise ValueError
+            fields = ('pendingRequests', 'pendingMessages', 'pendingBytes', 'inFlightHandlers', 'droppedMessages', 'nativeDroppedMessages')
+            if messaging.get('phase') not in ('offline', 'active', 'handoff', 'draining', 'closed'):
+                raise ValueError
+            for field in fields:
+                if field in messaging and messaging[field] is not None and (type(messaging[field]) not in (int, float) or messaging[field] < 0):
+                    raise ValueError
+            result['messaging'] = {key: messaging[key] for key in ('phase', *fields) if key in messaging}
         if "mesh" in result:
             mesh = result["mesh"]
             if not isinstance(mesh, dict) or mesh.get("role") not in ("discovering", "candidate", "leader", "follower", "error", "disabled") or (mesh.get("leaderId") is not None and (not isinstance(mesh["leaderId"], str) or len(mesh["leaderId"]) > 128)) or type(mesh.get("members")) is not int or not 0 <= mesh["members"] <= 9007199254740991 or not isinstance(mesh.get("reason"), str) or len(mesh["reason"]) > 240 or (mesh.get("upstreamConnected") is not None and type(mesh["upstreamConnected"]) is not bool):

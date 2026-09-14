@@ -48,12 +48,23 @@ class Connection:
             existing = False
 
             async def error_cb(error: Exception) -> None:
+                from nats.errors import SlowConsumerError
+                if isinstance(error, SlowConsumerError):
+                    self.hub.messaging.native_drops += 1
+                    self.hub._error(p.KinopioError("SLOW_CONSUMER", "Native subscription dropped a message"), "messaging")
+                    if self.active is candidate:
+                        self.hub.messaging.fail_requests("BUFFER_OVERFLOW")
+                    return
                 candidate["error"] = error
-                self.hub._error(error, "permissions")
+                denied = "permissions" in str(error).lower() or "authorization" in str(error).lower()
+                if denied and self.active is candidate:
+                    self.hub.messaging.fail_requests("PERMISSION_DENIED")
+                self.hub._error(p.KinopioError("PERMISSION_DENIED", "NATS permission denied") if denied else error, "permissions")
 
             async def closed_cb() -> None:
                 if self.active is candidate and not self.hub.closed:
                     self.active = None
+                    await self.hub.messaging.unbind()
                     for channel in self.hub._live_channels.values():
                         channel.invalidate()
                     self.hub._set_state("offline")
@@ -76,6 +87,8 @@ class Connection:
 
     async def _cycle_loop(self) -> None:
         while not self.hub.closed:
+            if self.hub.messaging.phase == "draining":
+                return
             self.hub._wake.clear()
             await self._cycle()
             delay = (
@@ -147,6 +160,7 @@ class Connection:
             if self.active and current is None:
                 old = self.active
                 self.active = None
+                await self.hub.messaging.unbind()
                 for channel in self.hub._live_channels.values():
                     channel.invalidate()
                 await _transport.close(old["connection"])
@@ -235,7 +249,10 @@ class Connection:
         requests: dict[str, float] = {}
 
         async def update(record: Any, message: Any) -> None:
-            self.hub.store._commit(p.record_of(record))
+            record = p.record_of(record)
+            if message.subject != p.key(self.hub.namespace, record["name"]):
+                raise p.KinopioError("INVALID_RECORD", "Record name does not match subject")
+            self.hub.store._commit(record)
 
         async def sync(request: Any, message: Any) -> None:
             instance = request.get("instanceId") if isinstance(request, dict) else None
@@ -243,7 +260,7 @@ class Connection:
                 not isinstance(instance, str)
                 or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", instance)
                 or instance == self.hub.instance_id
-                or not message.reply.startswith(f"{self.hub.base}.inbox.")
+                or not re.fullmatch(re.escape(f"{self.hub.base}.inbox.") + r"[A-Za-z0-9_-]{1,128}", message.reply)
             ):
                 return
             now = time.monotonic()
@@ -261,7 +278,7 @@ class Connection:
             self.hub.instances.receive(report, message.subject.rsplit(".", 1)[1])
 
         try:
-            await self._subscribe(candidate, f"{self.hub.base}.updates.>", update)
+            await self._subscribe(candidate, f"{p.token(self.hub.namespace)}.*", update)
             await self._subscribe(candidate, f"{self.hub.base}.sync", sync)
             await self._subscribe(candidate, f"{self.hub.base}.health.*", health)
             await candidate["connection"].flush(timeout=self.hub.options["timeout"])
@@ -271,15 +288,22 @@ class Connection:
             records = list(self.hub.store.records.values())
             for record in records:
                 await self._publish(
-                    candidate, f"{self.hub.base}.updates.{p.key(record['scope'], record['name'])}", record
+                    candidate, p.key(self.hub.namespace, record["name"]), record
                 )
             await candidate["connection"].flush(timeout=self.hub.options["timeout"])
             self.hub._assert_open()
             if candidate["error"]:
                 raise candidate["error"]
+            if self.hub.messaging.phase == "draining":
+                raise p.KinopioError("DRAINING", "Hub is draining")
+            if old and old is not candidate:
+                await self.hub.messaging.unbind(graceful=True)
+                self.active = None
+                await _transport.close(old["connection"])
             for channel in self.hub._live_channels.values():
                 await channel.bind(candidate)
             self.active = candidate
+            await self.hub.messaging.bind(candidate)
             self.last_switch = time.monotonic()
             self.last_switch_reason = reason
             if self.ever_connected:
@@ -294,8 +318,11 @@ class Connection:
             await self._peer_sync(candidate)
             await self.hub.instances._report()
         except BaseException:
-            if self.active is not candidate:
-                await _transport.close(candidate["connection"])
+            if self.active is candidate:
+                self.active = None
+                await self.hub.messaging.unbind()
+                self.hub._set_state("offline")
+            await _transport.close(candidate["connection"])
             raise
 
     async def _peer_sync(self, candidate: Any) -> None:
@@ -344,7 +371,7 @@ class Connection:
     async def _send_records(self, candidate: Any, records: list[Any], timeout: float) -> None:
         for record in records:
             await self._publish(
-                candidate, f"{self.hub.base}.updates.{p.key(record['scope'], record['name'])}", record
+                candidate, p.key(self.hub.namespace, record["name"]), record
             )
         await candidate["connection"].flush(timeout=timeout)
         self.hub._assert_open()

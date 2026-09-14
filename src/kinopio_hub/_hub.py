@@ -14,9 +14,10 @@ from typing import Any, Callable
 from . import _protocol as p
 from . import _transport
 from ._connection import Connection
-from ._variables import Scope, VariableStore
+from ._variables import Variable, VariableStore
 from ._instances import Instances
 from ._live import LiveChannel
+from ._messaging import Messaging
 
 Callback = Callable[..., Any]
 
@@ -24,7 +25,8 @@ Callback = Callable[..., Any]
 class KinopioHub:
     def __init__(
         self,
-        namespace: str = "default",
+        namespace: str | None = None,
+        *,
         servers: str | list[str] | None = None,
         mesh: bool | dict[str, Any] = True,
         **options: Any,
@@ -33,8 +35,8 @@ class KinopioHub:
             "selection" in options and not isinstance(options["selection"], dict)
         ):
             raise p.KinopioError("INVALID_OPTIONS", "mesh and selection must use supported option types")
+        self._namespace = p.name(p.id() if namespace is None else namespace, "namespace")
         self.options: dict[str, Any] = {
-            "namespace": p.name(namespace, "namespace"),
             "mesh": mesh,
             "health_interval": 5,
             "probe_interval": 15,
@@ -66,7 +68,7 @@ class KinopioHub:
                     "INVALID_OPTIONS", f"{field} must be positive and within supported limits"
                 )
         if "name" in options:
-            p.name(options["name"])
+            raise p.KinopioError("INVALID_OPTIONS", "name is no longer supported")
         for field, v in options.get("selection", {}).items():
             if (
                 field not in ("improvement_ms", "improvement_ratio", "cooldown")
@@ -94,6 +96,7 @@ class KinopioHub:
         self._live_channels: dict[str, LiveChannel] = {}
         self.store = VariableStore(self)
         self.connection = Connection(self)
+        self.messaging = Messaging(self)
         self.instances = Instances(self)
         self.writer = p.id()
         self.instance_id = p.id()
@@ -106,7 +109,7 @@ class KinopioHub:
         self.closed = False
         self.discovery_done = False
         self.started = time.monotonic()
-        self.base = p.prefix(namespace)
+        self.base = p.prefix(self.namespace)
         self.mesh_manager: Any = None
         self.mesh_leader: Any = None
         self.mesh_trusted_url: Any = None
@@ -156,7 +159,7 @@ class KinopioHub:
             try:
 
                 def discovered(candidate: Any) -> None:
-                    if self.closed or candidate.get("namespace") != self.options["namespace"]:
+                    if self.closed:
                         return
                     url = _transport.endpoint(candidate["url"])
                     if len(self.discovered) < 32 or url in self.discovered:
@@ -275,13 +278,14 @@ class KinopioHub:
         current_error = next(reversed(self.errors.values()), None)
         return {
             "instanceId": self.instance_id,
-            "name": self.options.get("name", self.instance_id),
+            "namespace": self.namespace,
             "sdk": "python",
             "version": p.VERSION,
             "runtime": f"python/{platform.python_version()}",
             "uptimeMs": round((time.monotonic() - self.started) * 1000),
             "connection": self.state,
             "mesh": p.copy(self.mesh_status),
+            "messaging": self.messaging.status(),
             "server": _transport.display_endpoint(
                 self.connection.active["url"] if self.connection.active else None
             ),
@@ -330,10 +334,13 @@ class KinopioHub:
         )
         return self
 
-    async def close(self) -> None:
+    def _begin_close(self) -> asyncio.Task[Any]:
         if self._close_task is None:
             self._close_task = asyncio.create_task(self._shutdown())
-        await asyncio.shield(self._close_task)
+        return self._close_task
+
+    async def close(self) -> None:
+        await asyncio.shield(self._begin_close())
 
     async def _shutdown(self) -> None:
         self.closed = True
@@ -344,6 +351,7 @@ class KinopioHub:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        await self.messaging.close()
         for channel in self._live_channels.values():
             await channel.close()
         await self.connection.close()
@@ -363,8 +371,12 @@ class KinopioHub:
     async def flush(self, timeout: float | None = None) -> None:
         await self.connection.flush(timeout)
 
-    def scope(self, scope_name: str) -> Scope:
-        return self.store.scope(scope_name)
+    @property
+    def namespace(self) -> str:
+        return self._namespace
+
+    def var(self, variable_name: str) -> Variable:
+        return self.store._reference(variable_name)
 
     def live(self, name: str) -> LiveChannel:
         self._assert_open()
@@ -374,3 +386,6 @@ class KinopioHub:
                 raise p.KinopioError('LIMIT_EXCEEDED', 'At most 128 live channels are supported')
             self._live_channels[name] = LiveChannel(self, name)
         return self._live_channels[name]
+
+    async def drain(self, *, timeout: float = 5) -> None:
+        await self.messaging.drain(timeout)

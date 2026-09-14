@@ -14,7 +14,7 @@ from typing import Any, Callable
 from ._election import MeshElection
 from ._mesh_config import MAX_PEERS, _port, config_for, host_identity, valid_id, valid_member
 from ._mesh_transport import LoadSampler, NativeTransport, broker_reachable, probe_uplink
-from ._protocol import js_stringify
+from ._protocol import PROTOCOL, js_stringify
 
 
 class MeshManager:
@@ -58,7 +58,7 @@ class MeshManager:
         if not isinstance(message, dict) or not isinstance(message.get('signature'), str) or re.fullmatch('[a-f0-9]{64}', message['signature']) is None:
             return None
         payload = message.get('payload')
-        if not isinstance(payload, dict) or payload.get('domain') != self.config['domain'] or type(payload.get('protocol')) is not int or payload['protocol'] != 1:
+        if not isinstance(payload, dict) or payload.get('domain') != self.config['domain'] or type(payload.get('protocol')) is not int or payload['protocol'] != PROTOCOL:
             return None
         try:
             return payload if hmac.compare_digest(self.sign(payload)['signature'], message['signature']) else None
@@ -71,7 +71,7 @@ class MeshManager:
         return {'id': self.id, 'hostId': self.host_id, 'seq': self.seq, 'port': self.port, 'vote': self.vote, 'load': self.load.copy(), 'uplink': self.uplink.copy(), 'observations': {k: v.copy() for k, v in self.observations.items()}, 'broker': broker, 'retryAfterMs': max(0, self.retry_at - self.now())}
 
     def envelope(self, extra: dict[str, Any]) -> dict[str, Any]:
-        return self.sign({'protocol': 1, 'domain': self.config['domain'], **extra})
+        return self.sign({'protocol': PROTOCOL, 'domain': self.config['domain'], **extra})
 
     @staticmethod
     def _ipv4(address: Any) -> bool:
